@@ -1,6 +1,6 @@
 # GalgoChef
 
-Prototipo web adaptable para encontrar recetas con los ingredientes que hay en casa. Sigue la estética verde esmeralda de la referencia visual más reciente y el flujo de despensa, espera de generación y receta con información nutricional descrito en el documento.
+Aplicación web adaptable para encontrar recetas con ingredientes disponibles, considerar alergias e intolerancias, guardar recetas en una cuenta y seguir la preparación paso a paso.
 
 ## Ejecutar en local
 
@@ -8,25 +8,38 @@ Requisitos: Node.js 20 o superior y npm.
 
 ```bash
 npm install
+cp .env.example .env.local
 npm run dev
 ```
 
-Abre [http://localhost:3000](http://localhost:3000). También puedes ejecutar `npm run lint` y `npm run build` para validar el proyecto.
+Completa `.env.local` con las variables de los servicios indicados abajo. Abre [http://localhost:3000](http://localhost:3000). Para validar el proyecto:
 
-## Incluye
+```bash
+npm run lint
+npx tsc --noEmit
+npm run build
+```
 
-- Despensa con filtros, búsqueda, selección de ingredientes y opción para añadir otros.
-- Navegación inferior entre Despensa, Explorar y Guardados.
-- Pantalla de espera animada de 2.5 segundos, sugerencias, detalle nutricional y modo de cocina paso a paso.
-- Recetas guardadas durante la sesión actual.
-- Endpoint `POST /api/generate-recipe` que valida los ingredientes y devuelve una receta de demostración.
+## Supabase: cuentas y guardados
 
-## Servicios externos para una versión conectada
+1. Crea un proyecto en [Supabase](https://supabase.com/).
+2. Copia la URL y la clave publicable (o `anon`) del proyecto a `SUPABASE_URL` y `SUPABASE_ANON_KEY`.
+3. En **Project Settings → API Keys**, copia la clave `service_role` a `SUPABASE_SERVICE_ROLE_KEY`. Es un secreto de servidor: nunca la pongas en el navegador, en una variable `NEXT_PUBLIC_*` ni en el repositorio.
+4. Ejecuta el contenido de [`supabase/migrations/202610250001_galgochef_accounts.sql`](./supabase/migrations/202610250001_galgochef_accounts.sql) en el SQL Editor de Supabase.
+5. En **Authentication → Providers → Email**, desactiva la confirmación de email para que el registro permita iniciar sesión sin verificar el correo. Esto es adecuado solo para este proyecto escolar; para un producto real, activa la confirmación.
 
-El prototipo funciona sin cuentas ni claves: la receta del endpoint es de demostración y no consulta un modelo de IA. Para generar recetas con IA, elige un proveedor (por ejemplo, OpenAI o Google Gemini), crea una clave API desde el panel de desarrolladores del proveedor y conéctala desde el endpoint del servidor. Guarda la clave en `.env.local` como variable privada; **no** la incluyas en variables `NEXT_PUBLIC_*` ni en el código del navegador.
+La aplicación permite registro con usuario, correo y contraseña; acceso con usuario o correo; preferencias alimentarias y recetas guardadas asociadas a la cuenta. Las sesiones se almacenan en cookies SSR y las tablas tienen Row Level Security. Sin sesión, las preferencias se aplican solo a la visita actual y los guardados no se sincronizan.
 
-La aplicación no sincroniza la despensa o recetas con la nube y los guardados se reinician al terminar la sesión del navegador. Para habilitar sincronización, crea un proyecto en Supabase y obtén la URL del proyecto y su clave publicable desde **Project Settings → API**. La clave publicable puede usarse en el cliente solo junto con políticas RLS bien configuradas; cualquier clave `service_role` debe permanecer exclusivamente en el servidor. Después habrá que crear las tablas y conectar el cliente de Supabase.
+## OpenAI: generación de recetas
 
-Las tarjetas de recetas usan una ilustración CSS y no requieren imágenes externas. Para acercar aún más la interfaz a la referencia, puedes conseguir una fotografía propia o con licencia adecuada de un omelette de espinaca y guardarla en `public/images/omelette.jpg`; entonces se puede sustituir la ilustración por esa foto.
+Guarda la clave de API de OpenAI en `AI_MODEL_API_KEY`. La llamada se realiza exclusivamente desde el servidor; la clave no se envía al navegador. `AI_MODEL` es opcional y por defecto usa `gpt-4o-mini`. El endpoint valida la receta estructurada y vuelve a comprobar que el resultado no coincida con las restricciones alimentarias configuradas.
 
-Para publicar, importa el repositorio en Vercel y configura allí las variables privadas necesarias para los servicios que decidas integrar. No se necesita comprar un dominio para probar una URL de despliegue; un dominio propio es opcional.
+La nutrición generada es una estimación, no consejo médico. La detección de alérgenos es conservadora pero no puede garantizar que un alimento sea seguro: revisa etiquetas, ingredientes y riesgo de contaminación cruzada. Configura límites de uso y presupuesto en el proveedor antes de desplegar públicamente.
+
+## Fotos de recetas (opcional)
+
+Las recetas pueden usar una URL HTTPS de imagen. Para buscar fotos automáticamente, crea una API key de [Pexels](https://www.pexels.com/api/) y configura `PEXELS_API_KEY`; el servidor busca una imagen por el nombre de la receta y muestra el crédito del fotógrafo y su fuente. Sin esta variable, la app conserva la ilustración de respaldo y no requiere imágenes externas.
+
+## Despliegue
+
+Puedes importar el repositorio a Vercel y configurar allí las mismas variables de servidor. Nunca configures `SUPABASE_SERVICE_ROLE_KEY` o `AI_MODEL_API_KEY` como variables públicas.

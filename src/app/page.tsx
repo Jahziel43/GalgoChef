@@ -12,17 +12,33 @@ import {
   Flame,
   Grid2X2,
   Leaf,
+  LogIn,
   Plus,
   Search,
   Share2,
   SlidersHorizontal,
   Sparkles,
+  UserRound,
   X,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  allergyOptions,
+  findDietaryConflicts,
+  intoleranceOptions,
+  type AllergyId,
+  type IntoleranceId,
+} from "@/lib/dietary";
 import { isRecipeData, type RecipeData } from "@/lib/recipe";
 
-type Tab = "pantry" | "explore" | "saved";
+type Tab = "pantry" | "explore" | "saved" | "account";
+type ProfileData = {
+  id: string;
+  username: string;
+  email: string;
+  allergies: AllergyId[];
+  intolerances: IntoleranceId[];
+};
 type PantryCategory = "Verduras" | "Proteínas" | "Lácteos" | "Otros";
 type PantryIngredient = {
   name: string;
@@ -95,9 +111,67 @@ export default function Home() {
   const [recipe, setRecipe] = useState<RecipeData | null>(null);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
   const [savedRecipes, setSavedRecipes] = useState<string[]>([]);
+  const [savedRecipeData, setSavedRecipeData] = useState<RecipeData[]>([]);
+  const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [allergies, setAllergies] = useState<AllergyId[]>([]);
+  const [intolerances, setIntolerances] = useState<IntoleranceId[]>([]);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [shareMessage, setShareMessage] = useState("");
   const generationId = useRef(0);
+
+  useEffect(() => {
+    void loadSession();
+  }, []);
+
+  async function loadSession() {
+    try {
+      const response = await fetch("/api/auth/session");
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo cargar la cuenta."));
+      }
+      if (
+        typeof data !== "object" ||
+        data === null ||
+        !("user" in data) ||
+        !data.user
+      ) {
+        setProfile(null);
+        setSavedRecipeData([]);
+        setSavedRecipes([]);
+        return;
+      }
+      const user = data.user as ProfileData;
+      setProfile(user);
+      setAllergies(user.allergies);
+      setIntolerances(user.intolerances);
+
+      const savedResponse = await fetch("/api/saved-recipes");
+      const savedData: unknown = await savedResponse.json();
+      if (!savedResponse.ok) {
+        throw new Error(
+          getResponseError(savedData, "No se pudieron cargar tus recetas guardadas."),
+        );
+      }
+      if (
+        typeof savedData === "object" &&
+        savedData !== null &&
+        "recipes" in savedData &&
+        Array.isArray(savedData.recipes)
+      ) {
+        const recipes = savedData.recipes.filter(isRecipeData);
+        setSavedRecipeData(recipes);
+        setSavedRecipes(recipes.map((item) => item.title));
+      }
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudo cargar la cuenta.",
+      );
+    }
+  }
 
   function toggleIngredient(ingredient: string) {
     setSelectedIngredients((current) =>
@@ -119,6 +193,21 @@ export default function Home() {
   }
 
   async function generateRecipe(ingredients = selectedIngredients) {
+    const conflicts = findDietaryConflicts(
+      ingredients.join(", "),
+      profile?.allergies ?? allergies,
+      profile?.intolerances ?? intolerances,
+    );
+    if (conflicts.length) {
+      const labels = [...allergyOptions, ...intoleranceOptions]
+        .filter((option) => conflicts.includes(option.id))
+        .map((option) => option.label);
+      setError(
+        `La despensa contiene ingredientes que podrían coincidir con tus restricciones: ${labels.join(", ")}.`,
+      );
+      return;
+    }
+
     generationId.current += 1;
     const requestId = generationId.current;
     setError("");
@@ -130,19 +219,18 @@ export default function Home() {
       const response = await fetch("/api/generate-recipe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ingredients }),
+        body: JSON.stringify({
+          ingredients,
+          allergies,
+          intolerances,
+        }),
       });
       const data: unknown = await response.json();
 
       if (!response.ok) {
-        const message =
-          typeof data === "object" &&
-          data !== null &&
-          "error" in data &&
-          typeof data.error === "string"
-            ? data.error
-            : "No pudimos preparar una receta. Inténtalo de nuevo.";
-        throw new Error(message);
+        throw new Error(
+          getResponseError(data, "No pudimos preparar una receta. Inténtalo de nuevo."),
+        );
       }
 
       if (!isRecipeData(data)) {
@@ -177,12 +265,132 @@ export default function Home() {
     setView("recipe");
   }
 
-  function toggleSaved(title: string) {
+  async function toggleSaved(recipeToToggle: RecipeData) {
+    const isSaved = savedRecipes.includes(recipeToToggle.title);
+    if (profile) {
+      try {
+        const response = await fetch("/api/saved-recipes", {
+          method: isSaved ? "DELETE" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            isSaved ? { title: recipeToToggle.title } : { recipe: recipeToToggle },
+          ),
+        });
+        const data: unknown = await response.json();
+        if (!response.ok) {
+          throw new Error(
+            getResponseError(data, "No se pudo actualizar la receta guardada."),
+          );
+        }
+        setSavedRecipes((current) =>
+          isSaved
+            ? current.filter((item) => item !== recipeToToggle.title)
+            : [...current, recipeToToggle.title],
+        );
+        setSavedRecipeData((current) =>
+          isSaved
+            ? current.filter((item) => item.title !== recipeToToggle.title)
+            : [recipeToToggle, ...current.filter((item) => item.title !== recipeToToggle.title)],
+        );
+      } catch (cause) {
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "No se pudo actualizar la receta guardada.",
+        );
+      }
+      return;
+    }
+
     setSavedRecipes((current) =>
-      current.includes(title)
-        ? current.filter((item) => item !== title)
-        : [...current, title],
+      isSaved
+        ? current.filter((item) => item !== recipeToToggle.title)
+        : [...current, recipeToToggle.title],
     );
+    setSavedRecipeData((current) =>
+      isSaved
+        ? current.filter((item) => item.title !== recipeToToggle.title)
+        : [recipeToToggle, ...current.filter((item) => item.title !== recipeToToggle.title)],
+    );
+  }
+
+  async function authenticate(
+    mode: "login" | "register",
+    values: { identifier: string; username?: string; email?: string; password: string },
+  ) {
+    const response = await fetch(`/api/auth/${mode}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        mode === "login"
+          ? { identifier: values.identifier, password: values.password }
+          : {
+              username: values.username,
+              email: values.email,
+              password: values.password,
+            },
+      ),
+    });
+    const data: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(getResponseError(data, "No se pudo completar el acceso."));
+    }
+    await loadSession();
+  }
+
+  async function logout() {
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo cerrar sesión."));
+      }
+      setProfile(null);
+      setSavedRecipes([]);
+      setSavedRecipeData([]);
+      setAllergies([]);
+      setIntolerances([]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "No se pudo cerrar sesión.");
+    }
+  }
+
+  async function saveDietaryPreferences() {
+    if (!profile) {
+      setNotice(
+        "Se usarán en esta sesión. Inicia sesión para sincronizarlas en tu cuenta.",
+      );
+      return;
+    }
+    try {
+      const response = await fetch("/api/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allergies, intolerances }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          getResponseError(data, "No se pudieron guardar tus preferencias."),
+        );
+      }
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "user" in data &&
+        typeof data.user === "object" &&
+        data.user !== null
+      ) {
+        setProfile(data.user as ProfileData);
+      }
+      setNotice("Preferencias alimentarias guardadas.");
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudieron guardar tus preferencias.",
+      );
+    }
   }
 
   function goToTab(nextTab: Tab) {
@@ -199,9 +407,14 @@ export default function Home() {
       .includes(search.trim().toLocaleLowerCase("es"));
     return categoryMatches && searchMatches;
   });
-  const allRecipes = recipe
-    ? [recipe, ...sampleRecipes.filter((item) => item.title !== recipe.title)]
-    : sampleRecipes;
+  const allRecipes = [
+    ...(recipe ? [recipe] : []),
+    ...savedRecipeData,
+    ...sampleRecipes,
+  ].filter(
+    (item, index, items) =>
+      items.findIndex((candidate) => candidate.title === item.title) === index,
+  );
   const displayedRecipes =
     tab === "saved"
       ? allRecipes.filter((item) => savedRecipes.includes(item.title))
@@ -230,6 +443,20 @@ export default function Home() {
                 </button>
               </div>
             )}
+            {notice && (
+              <div className="status-message" role="status">
+                <Check size={17} />
+                <span>{notice}</span>
+                <button
+                  aria-label="Cerrar aviso"
+                  className="icon-button"
+                  onClick={() => setNotice("")}
+                  type="button"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+            )}
 
             {view === "recipe" && recipe ? (
               <RecipeScreen
@@ -241,7 +468,7 @@ export default function Home() {
                 onShare={() =>
                   setShareMessage("Puedes compartir esta receta desde tu dispositivo.")
                 }
-                onToggleSaved={() => toggleSaved(recipe.title)}
+                onToggleSaved={() => void toggleSaved(recipe)}
                 onToggleStep={(stepIndex) =>
                   setCompletedSteps((current) =>
                     current.includes(stepIndex)
@@ -425,7 +652,7 @@ export default function Home() {
                       recipe={suggestion}
                       saved={savedRecipes.includes(suggestion.title)}
                       onOpen={() => showRecipe(suggestion)}
-                      onToggleSaved={() => toggleSaved(suggestion.title)}
+                      onToggleSaved={() => void toggleSaved(suggestion)}
                     />
                   ))}
                   {displayedRecipes.length === 0 && (
@@ -458,12 +685,16 @@ export default function Home() {
                   </button>
                 )}
               </section>
-            ) : (
+            ) : tab === "saved" ? (
               <section aria-labelledby="saved-title" className="saved-screen">
                 <div className="screen-heading">
                   <div>
                     <h1 id="saved-title">Mis recetas</h1>
-                    <p>Guardadas durante esta sesión</p>
+                    <p>
+                      {profile
+                        ? "Sincronizadas con tu cuenta"
+                        : "Guardadas durante esta sesión"}
+                    </p>
                   </div>
                   <span className="sync-badge">
                     <Leaf size={17} />
@@ -475,7 +706,11 @@ export default function Home() {
                   </span>
                   <span>
                     <strong>Todo está a mano</strong>
-                    <small>Tu lista está disponible mientras usas la app</small>
+                    <small>
+                      {profile
+                        ? "Tus recetas están guardadas en tu cuenta"
+                        : "Tu lista está disponible mientras usas la app"}
+                    </small>
                   </span>
                   <Leaf size={16} />
                 </div>
@@ -506,7 +741,7 @@ export default function Home() {
                       recipe={savedRecipe}
                       saved
                       onOpen={() => showRecipe(savedRecipe)}
-                      onToggleSaved={() => toggleSaved(savedRecipe.title)}
+                      onToggleSaved={() => void toggleSaved(savedRecipe)}
                     />
                   ))
                 ) : (
@@ -523,6 +758,17 @@ export default function Home() {
                   </div>
                 )}
               </section>
+            ) : (
+              <AccountScreen
+                profile={profile}
+                allergies={allergies}
+                intolerances={intolerances}
+                onAllergiesChange={setAllergies}
+                onIntolerancesChange={setIntolerances}
+                onAuthenticate={authenticate}
+                onLogout={logout}
+                onSavePreferences={saveDietaryPreferences}
+              />
             )}
           </div>
 
@@ -555,11 +801,285 @@ export default function Home() {
                 <Bookmark size={18} />
                 <span>Guardados</span>
               </button>
+              <button
+                aria-current={tab === "account" ? "page" : undefined}
+                className={tab === "account" ? "bottom-link active" : "bottom-link"}
+                onClick={() => goToTab("account")}
+                type="button"
+              >
+                <UserRound size={18} />
+                <span>Cuenta</span>
+              </button>
             </nav>
           )}
         </>
       )}
     </main>
+  );
+}
+
+function getResponseError(data: unknown, fallback: string) {
+  return typeof data === "object" &&
+    data !== null &&
+    "error" in data &&
+    typeof data.error === "string"
+    ? data.error
+    : fallback;
+}
+
+function AccountScreen({
+  profile,
+  allergies,
+  intolerances,
+  onAllergiesChange,
+  onIntolerancesChange,
+  onAuthenticate,
+  onLogout,
+  onSavePreferences,
+}: {
+  profile: ProfileData | null;
+  allergies: AllergyId[];
+  intolerances: IntoleranceId[];
+  onAllergiesChange: (values: AllergyId[]) => void;
+  onIntolerancesChange: (values: IntoleranceId[]) => void;
+  onAuthenticate: (
+    mode: "login" | "register",
+    values: {
+      identifier: string;
+      username?: string;
+      email?: string;
+      password: string;
+    },
+  ) => Promise<void>;
+  onLogout: () => Promise<void>;
+  onSavePreferences: () => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [identifier, setIdentifier] = useState("");
+  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [formError, setFormError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function submitAuthentication(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setFormError("");
+    setIsSubmitting(true);
+    try {
+      await onAuthenticate(mode, {
+        identifier,
+        username,
+        email,
+        password,
+      });
+      setPassword("");
+    } catch (cause) {
+      setFormError(
+        cause instanceof Error ? cause.message : "No se pudo completar el acceso.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <section aria-labelledby="account-title" className="account-screen">
+      <div className="screen-heading">
+        <div>
+          <h1 id="account-title">Mi cuenta</h1>
+          <p>Personaliza tus recetas y restricciones</p>
+        </div>
+        <span className="sync-badge">
+          <UserRound size={18} />
+        </span>
+      </div>
+
+      {profile ? (
+        <div className="account-card">
+          <div className="account-user">
+            <span className="account-avatar">
+              {profile.username.slice(0, 1).toLocaleUpperCase("es")}
+            </span>
+            <span>
+              <strong>@{profile.username}</strong>
+              <small>{profile.email}</small>
+            </span>
+            <button
+              className="account-logout"
+              onClick={() => void onLogout()}
+              type="button"
+            >
+              Cerrar sesión
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="account-card">
+          <div className="auth-tabs" role="tablist" aria-label="Acceso a cuenta">
+            <button
+              aria-selected={mode === "login"}
+              className={mode === "login" ? "auth-tab active" : "auth-tab"}
+              onClick={() => {
+                setMode("login");
+                setFormError("");
+              }}
+              role="tab"
+              type="button"
+            >
+              Iniciar sesión
+            </button>
+            <button
+              aria-selected={mode === "register"}
+              className={mode === "register" ? "auth-tab active" : "auth-tab"}
+              onClick={() => {
+                setMode("register");
+                setFormError("");
+              }}
+              role="tab"
+              type="button"
+            >
+              Crear cuenta
+            </button>
+          </div>
+          <form className="account-form" onSubmit={submitAuthentication}>
+            {mode === "register" ? (
+              <>
+                <label>
+                  Nombre de usuario
+                  <input
+                    autoComplete="username"
+                    maxLength={24}
+                    minLength={3}
+                    onChange={(event) => setUsername(event.target.value)}
+                    pattern="[a-zA-Z0-9_.-]{3,24}"
+                    required
+                    value={username}
+                  />
+                </label>
+                <label>
+                  Correo
+                  <input
+                    autoComplete="email"
+                    onChange={(event) => setEmail(event.target.value)}
+                    required
+                    type="email"
+                    value={email}
+                  />
+                </label>
+              </>
+            ) : (
+              <label>
+                Usuario o correo
+                <input
+                  autoComplete="username"
+                  onChange={(event) => setIdentifier(event.target.value)}
+                  required
+                  value={identifier}
+                />
+              </label>
+            )}
+            <label>
+              Contraseña
+              <input
+                autoComplete={
+                  mode === "register" ? "new-password" : "current-password"
+                }
+                maxLength={72}
+                minLength={mode === "register" ? 8 : undefined}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+                type="password"
+                value={password}
+              />
+            </label>
+            {formError && (
+              <p className="account-form-error" role="alert">
+                {formError}
+              </p>
+            )}
+            <button
+              className="primary-button account-submit"
+              disabled={isSubmitting}
+              type="submit"
+            >
+              <LogIn size={17} />
+              {isSubmitting
+                ? "Un momento..."
+                : mode === "login"
+                  ? "Entrar"
+                  : "Crear cuenta"}
+            </button>
+          </form>
+          <p className="account-hint">
+            Las preferencias sin iniciar sesión solo se usan en esta visita.
+          </p>
+        </div>
+      )}
+
+      <section className="dietary-card" aria-labelledby="dietary-title">
+        <div className="dietary-heading">
+          <span className="dietary-icon">🌿</span>
+          <span>
+            <h2 id="dietary-title">Alergias e intolerancias</h2>
+            <p>
+              {profile
+                ? "Se guardan en tu cuenta y se consideran al crear recetas."
+                : "Se aplican a las recetas de esta visita."}
+            </p>
+          </span>
+        </div>
+        <h3>Alergias</h3>
+        <div className="dietary-options">
+          {allergyOptions.map((option) => (
+            <label className="dietary-option" key={option.id}>
+              <input
+                checked={allergies.includes(option.id)}
+                onChange={(event) =>
+                  onAllergiesChange(
+                    event.target.checked
+                      ? [...allergies, option.id]
+                      : allergies.filter((item) => item !== option.id),
+                  )
+                }
+                type="checkbox"
+              />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+        <h3>Intolerancias o sensibilidades</h3>
+        <div className="dietary-options">
+          {intoleranceOptions.map((option) => (
+            <label className="dietary-option" key={option.id}>
+              <input
+                checked={intolerances.includes(option.id)}
+                onChange={(event) =>
+                  onIntolerancesChange(
+                    event.target.checked
+                      ? [...intolerances, option.id]
+                      : intolerances.filter((item) => item !== option.id),
+                  )
+                }
+                type="checkbox"
+              />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+        <div className="dietary-warning">
+          Revisa siempre las etiquetas y el riesgo de contaminación cruzada.
+          Estas sugerencias no garantizan seguridad médica.
+        </div>
+        <button
+          className="primary-button dietary-save"
+          onClick={() => void onSavePreferences()}
+          type="button"
+        >
+          Guardar preferencias
+        </button>
+      </section>
+    </section>
   );
 }
 
@@ -671,13 +1191,23 @@ function RecipeCard({
         type="button"
       >
         <span className="recipe-photo" aria-hidden="true">
-          <span className="plate">
-            {recipe.title.toLocaleLowerCase("es").includes("pasta")
-              ? "🍝"
-              : recipe.title.toLocaleLowerCase("es").includes("tostada")
-                ? "🥑"
-                : "🍳"}
-          </span>
+          {recipe.imageUrl ? (
+            <span
+              aria-hidden="true"
+              className="recipe-photo-image"
+              style={{
+                backgroundImage: `url("${new URL(recipe.imageUrl).toString()}")`,
+              }}
+            />
+          ) : (
+            <span className="plate">
+              {recipe.title.toLocaleLowerCase("es").includes("pasta")
+                ? "🍝"
+                : recipe.title.toLocaleLowerCase("es").includes("tostada")
+                  ? "🥑"
+                  : "🍳"}
+            </span>
+          )}
           <span className="photo-match">
             <Sparkles size={11} /> {recipe.matchPercentage}% coincidencia
           </span>
@@ -718,6 +1248,16 @@ function RecipeCard({
             <Bookmark size={16} fill="currentColor" />
           </button>
         </div>
+      )}
+      {recipe.imagePhotographer && recipe.imageSourceUrl && (
+        <a
+          className="image-credit"
+          href={recipe.imageSourceUrl}
+          rel="noreferrer"
+          target="_blank"
+        >
+          Foto: {recipe.imagePhotographer} / Pexels
+        </a>
       )}
     </article>
   );
