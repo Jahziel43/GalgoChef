@@ -45,16 +45,57 @@ type PantryIngredient = {
   category: PantryCategory;
 };
 
-const pantryIngredients: PantryIngredient[] = [
-  { name: "Huevos", category: "Proteínas" },
-  { name: "Espinaca", category: "Verduras" },
-  { name: "Tomate", category: "Verduras" },
-  { name: "Aguacate", category: "Verduras" },
-  { name: "Yogur", category: "Lácteos" },
-  { name: "Pollo", category: "Proteínas" },
-  { name: "Cebolla", category: "Verduras" },
-  { name: "Aceite de oliva", category: "Otros" },
-];
+const pantryIngredients: PantryIngredient[] = (
+  [
+    { name: "Huevos", category: "Proteínas" },
+    { name: "Espinaca", category: "Verduras" },
+    { name: "Tomate", category: "Verduras" },
+    { name: "Aguacate", category: "Verduras" },
+    { name: "Yogur", category: "Lácteos" },
+    { name: "Pollo", category: "Proteínas" },
+    { name: "Cebolla", category: "Verduras" },
+    { name: "Aceite de oliva", category: "Otros" },
+    { name: "Arroz", category: "Otros" },
+    { name: "Pasta", category: "Otros" },
+    { name: "Papa", category: "Verduras" },
+    { name: "Zanahoria", category: "Verduras" },
+    { name: "Pimiento", category: "Verduras" },
+    { name: "Queso", category: "Lácteos" },
+    { name: "Leche", category: "Lácteos" },
+    { name: "Atún", category: "Proteínas" },
+    { name: "Sardina", category: "Proteínas" },
+    { name: "Cerdo", category: "Proteínas" },
+    { name: "Res", category: "Proteínas" },
+    { name: "Salmón", category: "Proteínas" },
+    { name: "Champiñón", category: "Verduras" },
+    { name: "Brócoli", category: "Verduras" },
+    { name: "Ajo", category: "Verduras" },
+    { name: "Jitomate", category: "Verduras" },
+    { name: "Perejil", category: "Verduras" },
+    { name: "Lentejas", category: "Otros" },
+    { name: "Frijoles", category: "Otros" },
+    { name: "Pan", category: "Otros" },
+    { name: "Tortilla", category: "Otros" },
+    { name: "Manzana", category: "Otros" },
+    { name: "Plátano", category: "Otros" },
+    { name: "Mango", category: "Otros" },
+    { name: "Almendras", category: "Otros" },
+    { name: "Nueces", category: "Otros" },
+    { name: "Avena", category: "Otros" },
+    { name: "Garbanzos", category: "Otros" },
+    { name: "Pepino", category: "Verduras" },
+    { name: "Calabaza", category: "Verduras" },
+    { name: "Calabacín", category: "Verduras" },
+    { name: "Maíz", category: "Verduras" },
+    { name: "Salsa de soya", category: "Otros" },
+    { name: "Pera", category: "Otros" },
+    { name: "Nueces pecanas", category: "Otros" },
+    { name: "Pescado", category: "Proteínas" },
+  ] as PantryIngredient[]
+).filter(
+  (ingredient, index, ingredients) =>
+    ingredients.findIndex((candidate) => candidate.name === ingredient.name) === index,
+);
 
 const filters = ["Todos", "Verduras", "Proteínas", "Lácteos", "Otros"] as const;
 type PantryFilter = (typeof filters)[number];
@@ -465,6 +506,12 @@ export default function Home() {
                 completedSteps={completedSteps}
                 shareMessage={shareMessage}
                 onBack={() => goToTab(tab)}
+                onComplete={() => {
+                  setCompletedSteps([]);
+                  setRecipe(null);
+                  setView("pantry");
+                  setTab("pantry");
+                }}
                 onShare={() =>
                   setShareMessage("Puedes compartir esta receta desde tu dispositivo.")
                 }
@@ -1256,7 +1303,7 @@ function RecipeCard({
           rel="noreferrer"
           target="_blank"
         >
-          Foto: {recipe.imagePhotographer} / Pexels
+          Foto: {recipe.imagePhotographer} / Pixabay
         </a>
       )}
     </article>
@@ -1287,6 +1334,7 @@ function RecipeScreen({
   completedSteps,
   shareMessage,
   onBack,
+  onComplete,
   onShare,
   onToggleSaved,
   onToggleStep,
@@ -1296,6 +1344,7 @@ function RecipeScreen({
   completedSteps: number[];
   shareMessage: string;
   onBack: () => void;
+  onComplete: () => void;
   onShare: () => void;
   onToggleSaved: () => void;
   onToggleStep: (stepIndex: number) => void;
@@ -1344,6 +1393,10 @@ function RecipeScreen({
         <button
           className="primary-button"
           onClick={() => {
+            if (completedSteps.length === recipe.steps.length) {
+              onComplete();
+              return;
+            }
             const nextStep = recipe.steps.findIndex(
               (_, index) => !completedSteps.includes(index),
             );
@@ -1353,7 +1406,7 @@ function RecipeScreen({
         >
           <ChefHat size={18} />
           {completedSteps.length === recipe.steps.length
-            ? "¡Receta completada!"
+            ? "Volver a la despensa"
             : completedSteps.length === 0
               ? "Iniciar modo cocina"
               : "Siguiente paso"}

@@ -30,15 +30,15 @@ npm run build
 
 La aplicación permite registro con usuario, correo y contraseña; acceso con usuario o correo; preferencias alimentarias y recetas guardadas asociadas a la cuenta. Las sesiones se almacenan en cookies SSR y las tablas tienen Row Level Security. Sin sesión, las preferencias se aplican solo a la visita actual y los guardados no se sincronizan.
 
-## OpenAI: generación de recetas
+## IA: generación de recetas
 
-Guarda la clave de API de OpenAI en `AI_MODEL_API_KEY`. La llamada se realiza exclusivamente desde el servidor; la clave no se envía al navegador. `AI_MODEL` es opcional y por defecto usa `gpt-4o-mini`. El endpoint valida la receta estructurada y vuelve a comprobar que el resultado no coincida con las restricciones alimentarias configuradas.
+La app admite varios proveedores compatibles con OpenAI y también Google Gemini. Para una opción en la nube sin instalar nada, usa Gemini con `AI_PROVIDER=gemini`, `AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta` y `AI_MODEL=gemini-2.0-flash`, junto con `AI_MODEL_API_KEY` del proyecto de Google AI Studio. La llamada se realiza exclusivamente desde el servidor; la clave no se envía al navegador. El endpoint valida la receta estructurada y vuelve a comprobar que el resultado no coincida con las restricciones alimentarias configuradas.
 
 La nutrición generada es una estimación, no consejo médico. La detección de alérgenos es conservadora pero no puede garantizar que un alimento sea seguro: revisa etiquetas, ingredientes y riesgo de contaminación cruzada. Configura límites de uso y presupuesto en el proveedor antes de desplegar públicamente.
 
 ## Fotos de recetas (opcional)
 
-Las recetas pueden usar una URL HTTPS de imagen. Para buscar fotos automáticamente, crea una API key de [Pexels](https://www.pexels.com/api/) y configura `PEXELS_API_KEY`; el servidor busca una imagen por el nombre de la receta y muestra el crédito del fotógrafo y su fuente. Sin esta variable, la app conserva la ilustración de respaldo y no requiere imágenes externas.
+Las recetas pueden usar una URL HTTPS de imagen. Para buscar fotos automáticamente, crea una API key de [Pixabay](https://pixabay.com/api/docs/) y configura `PIXABAY_API_KEY`; el servidor busca una imagen por el nombre de la receta y muestra el crédito del fotógrafo y su fuente. Sin esta variable, la app conserva la ilustración de respaldo y no requiere imágenes externas.
 
 ## Despliegue
 
