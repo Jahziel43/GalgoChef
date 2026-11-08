@@ -13,6 +13,7 @@ import {
   Grid2X2,
   Leaf,
   LogIn,
+  Minus,
   Plus,
   Search,
   Share2,
@@ -32,6 +33,13 @@ import {
 import { isRecipeData, type RecipeData } from "@/lib/recipe";
 
 type Tab = "pantry" | "explore" | "saved" | "account";
+type CollectionData = {
+  id: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  recipes: RecipeData[];
+};
 type ProfileData = {
   id: string;
   username: string;
@@ -156,6 +164,14 @@ export default function Home() {
   const [profile, setProfile] = useState<ProfileData | null>(null);
   const [allergies, setAllergies] = useState<AllergyId[]>([]);
   const [intolerances, setIntolerances] = useState<IntoleranceId[]>([]);
+  const [exploreRecipes, setExploreRecipes] = useState<RecipeData[]>([]);
+  const [collections, setCollections] = useState<CollectionData[]>([]);
+  const [showCollectionForm, setShowCollectionForm] = useState(false);
+  const [showCollectionPicker, setShowCollectionPicker] = useState(false);
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newCollectionDescription, setNewCollectionDescription] = useState("");
+  const [collectionTarget, setCollectionTarget] = useState<RecipeData | null>(null);
+  const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [shareMessage, setShareMessage] = useState("");
@@ -164,6 +180,18 @@ export default function Home() {
   useEffect(() => {
     void loadSession();
   }, []);
+
+  useEffect(() => {
+    void loadExploreRecipes();
+  }, [selectedIngredients]);
+
+  useEffect(() => {
+    if (profile) {
+      void loadCollections(profile);
+    } else {
+      setCollections([]);
+    }
+  }, [profile]);
 
   async function loadSession() {
     try {
@@ -181,6 +209,7 @@ export default function Home() {
         setProfile(null);
         setSavedRecipeData([]);
         setSavedRecipes([]);
+        setCollections([]);
         return;
       }
       const user = data.user as ProfileData;
@@ -205,6 +234,8 @@ export default function Home() {
         setSavedRecipeData(recipes);
         setSavedRecipes(recipes.map((item) => item.title));
       }
+
+      await loadCollections(user);
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -212,6 +243,169 @@ export default function Home() {
           : "No se pudo cargar la cuenta.",
       );
     }
+  }
+
+  async function loadCollections(userOverride?: ProfileData | null) {
+    const activeProfile = userOverride ?? profile;
+    if (!activeProfile) {
+      setCollections([]);
+      return [] as CollectionData[];
+    }
+
+    try {
+      const response = await fetch("/api/collections");
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudieron cargar tus colecciones."));
+      }
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "collections" in data &&
+        Array.isArray(data.collections)
+      ) {
+        const nextCollections = data.collections.filter(
+          (collection): collection is CollectionData =>
+            typeof collection === "object" &&
+            collection !== null &&
+            typeof (collection as { id?: unknown }).id === "string" &&
+            typeof (collection as { name?: unknown }).name === "string",
+        );
+        setCollections(nextCollections);
+        return nextCollections;
+      }
+      setCollections([]);
+      return [] as CollectionData[];
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudieron cargar tus colecciones.",
+      );
+      return [] as CollectionData[];
+    }
+  }
+
+  async function loadExploreRecipes() {
+    const params = new URLSearchParams();
+    if (selectedIngredients.length > 0) {
+      params.set("ingredients", selectedIngredients.join(","));
+    }
+
+    try {
+      const response = await fetch(`/api/recipes${params.toString() ? `?${params.toString()}` : ""}`);
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudieron cargar las recetas del explorador."));
+      }
+      if (typeof data === "object" && data !== null && "recipes" in data && Array.isArray(data.recipes)) {
+        setExploreRecipes(data.recipes.filter(isRecipeData));
+      } else {
+        setExploreRecipes([]);
+      }
+    } catch (cause) {
+      setExploreRecipes([]);
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudieron cargar las recetas del explorador.",
+      );
+    }
+  }
+
+  async function createCollection() {
+    const name = newCollectionName.trim();
+    if (!profile || !name) {
+      setError("Escribe un nombre para la colección.");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/collections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          description: newCollectionDescription.trim(),
+        }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo crear la colección."));
+      }
+      setNewCollectionName("");
+      setNewCollectionDescription("");
+      setShowCollectionForm(false);
+      const nextCollections = await loadCollections();
+      if (collectionTarget && nextCollections && nextCollections.length > 0) {
+        setShowCollectionPicker(true);
+      }
+      setNotice("Colección creada correctamente.");
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudo crear la colección.",
+      );
+    }
+  }
+
+  async function addRecipeToCollection(collectionId: string, recipeToAdd: RecipeData) {
+    try {
+      const response = await fetch(`/api/collections/${collectionId}/recipes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recipe: recipeToAdd }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo guardar la receta en la colección."));
+      }
+      await loadCollections();
+      setShowCollectionPicker(false);
+      setCollectionTarget(null);
+      setNotice("Receta añadida a la colección.");
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudo guardar la receta en la colección.",
+      );
+    }
+  }
+
+  async function removeRecipeFromCollection(collectionId: string, recipeTitle: string) {
+    try {
+      const response = await fetch(`/api/collections/${collectionId}/recipes`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: recipeTitle }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo quitar la receta de la colección."));
+      }
+      await loadCollections();
+      setNotice("Receta quitada de la colección.");
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudo quitar la receta de la colección.",
+      );
+    }
+  }
+
+  function openCollectionPicker(recipe: RecipeData) {
+    setCollectionTarget(recipe);
+    if (!collections.length) {
+      setShowCollectionPicker(true);
+      setShowCollectionForm(true);
+      return;
+    }
+
+    setShowCollectionPicker(true);
+    setShowCollectionForm(false);
   }
 
   function toggleIngredient(ingredient: string) {
@@ -456,12 +650,17 @@ export default function Home() {
     (item, index, items) =>
       items.findIndex((candidate) => candidate.title === item.title) === index,
   );
+  const exploreCandidates = exploreRecipes.length > 0 ? exploreRecipes : sampleRecipes;
   const displayedRecipes =
     tab === "saved"
       ? allRecipes.filter((item) => savedRecipes.includes(item.title))
-      : showMoreRecipes
-        ? allRecipes
-        : allRecipes.slice(0, 1);
+      : tab === "explore"
+        ? showMoreRecipes
+          ? exploreCandidates
+          : exploreCandidates.slice(0, 3)
+        : showMoreRecipes
+          ? allRecipes
+          : allRecipes.slice(0, 1);
 
   return (
     <main className="app-shell">
@@ -516,6 +715,7 @@ export default function Home() {
                   setShareMessage("Puedes compartir esta receta desde tu dispositivo.")
                 }
                 onToggleSaved={() => void toggleSaved(recipe)}
+                onAddToCollection={() => openCollectionPicker(recipe)}
                 onToggleStep={(stepIndex) =>
                   setCompletedSteps((current) =>
                     current.includes(stepIndex)
@@ -685,12 +885,22 @@ export default function Home() {
                 <div className="screen-heading">
                   <div>
                     <h1 id="recipes-title">Recetas sugeridas</h1>
-                    <p>{selectedIngredients.length || 3} ingredientes seleccionados</p>
+                    <p>
+                      {selectedIngredients.length > 0
+                        ? `${selectedIngredients.length} ingredientes seleccionados`
+                        : `${exploreCandidates.length} sugerencias para tu despensa`}
+                    </p>
                   </div>
                   <span className="time-filter">
                     <SlidersHorizontal size={14} />
-                    Menos de 20 min
+                    {selectedIngredients.length > 0 ? "Compatibles" : "Explorar"}
                   </span>
+                </div>
+                <div className="explore-highlight">
+                  <Sparkles size={14} />
+                  {selectedIngredients.length > 0
+                    ? "Recetas filtradas por tus ingredientes disponibles"
+                    : "Recomendaciones generales para empezar a cocinar"}
                 </div>
                 <div className="recipe-list">
                   {displayedRecipes.map((suggestion) => (
@@ -700,35 +910,49 @@ export default function Home() {
                       saved={savedRecipes.includes(suggestion.title)}
                       onOpen={() => showRecipe(suggestion)}
                       onToggleSaved={() => void toggleSaved(suggestion)}
+                      onAddToCollection={() => openCollectionPicker(suggestion)}
                     />
                   ))}
                   {displayedRecipes.length === 0 && (
                     <div className="empty-card">
                       <Bookmark size={24} />
-                      <h2>Aún no guardas recetas</h2>
-                      <p>Guarda una receta y aparecerá aquí.</p>
-                      <button onClick={() => goToTab("explore")} type="button">
-                        Explorar recetas
+                      <h2>No encontramos una receta compatible</h2>
+                      <p>Prueba con otros ingredientes o genera una nueva receta.</p>
+                      <button onClick={() => goToTab("pantry")} type="button">
+                        Volver a la despensa
                       </button>
                     </div>
                   )}
                 </div>
-                {!showMoreRecipes && allRecipes.length > 1 && (
+                {displayedRecipes.length > 0 && !showMoreRecipes && exploreCandidates.length > 3 && (
                   <button
                     className="more-recipes"
                     onClick={() => setShowMoreRecipes(true)}
                     type="button"
                   >
-                  <span className="more-icon">
-                    <ChefHat size={17} />
-                  </span>
-                  <span>
-                    <strong>
-                      {allRecipes.length - 1} recetas más para ti
-                    </strong>
-                    <small>Con tus ingredientes</small>
-                  </span>
-                  <ChevronRight size={18} />
+                    <span className="more-icon">
+                      <ChefHat size={17} />
+                    </span>
+                    <span>
+                      <strong>
+                        {exploreCandidates.length - 3} recetas más para ti
+                      </strong>
+                      <small>Con tus ingredientes</small>
+                    </span>
+                    <ChevronRight size={18} />
+                  </button>
+                )}
+                {displayedRecipes.length === 0 && (
+                  <button
+                    className="primary-button"
+                    onClick={() => {
+                      setTab("pantry");
+                      setView("pantry");
+                    }}
+                    type="button"
+                  >
+                    <Sparkles size={17} />
+                    Generar nueva receta
                   </button>
                 )}
               </section>
@@ -762,19 +986,113 @@ export default function Home() {
                   <Leaf size={16} />
                 </div>
 
-                <div className="section-subheading">
-                  <h2>Colecciones</h2>
-                  <span>3 colecciones</span>
-                </div>
-                <div className="collection-grid">
-                  <CollectionCard icon="🥗" title="Cenas ligeras" count="4 recetas" />
-                  <CollectionCard icon="💪" title="Altas en proteína" count="6 recetas" />
-                  <CollectionCard icon="☀️" title="Desayunos rápidos" count="3 recetas" />
-                  <div className="collection-card new-collection">
-                    <Plus size={19} />
-                    <strong>Nueva colección</strong>
-                  </div>
-                </div>
+                {selectedCollectionId ? (() => {
+                  const selectedCollection = collections.find((collection) => collection.id === selectedCollectionId) ?? null;
+                  return (
+                    <div className="collection-detail-view">
+                      <div className="screen-heading collection-detail-header">
+                        <button
+                          aria-label="Volver a colecciones"
+                          className="round-icon-button"
+                          onClick={() => setSelectedCollectionId(null)}
+                          type="button"
+                        >
+                          <ArrowLeft size={19} />
+                        </button>
+                        <div>
+                          <h1>{selectedCollection?.name ?? "Colección"}</h1>
+                          <p>{selectedCollection?.recipes.length ?? 0} recetas guardadas</p>
+                        </div>
+                      </div>
+                      {selectedCollection && selectedCollection.recipes.length > 0 ? (
+                        <div className="recipe-list">
+                          {selectedCollection.recipes.map((recipe) => (
+                            <RecipeCard
+                              key={`${selectedCollection.id}-${recipe.title}`}
+                              compact
+                              recipe={recipe}
+                              saved
+                              onOpen={() => showRecipe(recipe)}
+                              onToggleSaved={() => void toggleSaved(recipe)}
+                              onAddToCollection={() => openCollectionPicker(recipe)}
+                              onRemoveFromCollection={() => void removeRecipeFromCollection(selectedCollection.id, recipe.title)}
+                            />
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="empty-card">
+                          <Bookmark size={24} />
+                          <h2>Esta colección aún está vacía</h2>
+                          <p>Añade recetas desde explorar o desde una receta guardada.</p>
+                          <button onClick={() => { setSelectedCollectionId(null); goToTab("explore"); }} type="button">
+                            Explorar recetas
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })() : (
+                  <>
+                    <div className="section-subheading">
+                      <h2>Colecciones</h2>
+                      <span>{collections.length} colecciones</span>
+                    </div>
+                    <div className="collection-grid">
+                      {collections.map((collection) => (
+                        <CollectionCard
+                          key={collection.id}
+                          icon={collection.name.toLowerCase().includes("desayuno") ? "☀️" : collection.name.toLowerCase().includes("prote") ? "💪" : "🥗"}
+                          title={collection.name}
+                          count={`${collection.recipes.length} recetas`}
+                          onClick={() => setSelectedCollectionId(collection.id)}
+                        />
+                      ))}
+                      {showCollectionForm ? (
+                        <form
+                          className="collection-card new-collection form-card"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            void createCollection();
+                          }}
+                        >
+                          <input
+                            value={newCollectionName}
+                            onChange={(event) => setNewCollectionName(event.target.value)}
+                            placeholder="Nombre"
+                            aria-label="Nombre de la colección"
+                          />
+                          <textarea
+                            value={newCollectionDescription}
+                            onChange={(event) => setNewCollectionDescription(event.target.value)}
+                            placeholder="Descripción opcional"
+                            aria-label="Descripción de la colección"
+                          />
+                          <div className="collection-form-actions">
+                            <button className="small-button" type="submit">
+                              Crear
+                            </button>
+                            <button
+                              className="small-button secondary"
+                              onClick={() => setShowCollectionForm(false)}
+                              type="button"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <button
+                          className="collection-card new-collection"
+                          onClick={() => setShowCollectionForm(true)}
+                          type="button"
+                        >
+                          <Plus size={19} />
+                          <strong>Nueva colección</strong>
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
 
                 <div className="section-subheading recent-heading">
                   <h2>Guardada recientemente</h2>
@@ -789,6 +1107,7 @@ export default function Home() {
                       saved
                       onOpen={() => showRecipe(savedRecipe)}
                       onToggleSaved={() => void toggleSaved(savedRecipe)}
+                      onAddToCollection={() => openCollectionPicker(savedRecipe)}
                     />
                   ))
                 ) : (
@@ -818,6 +1137,92 @@ export default function Home() {
               />
             )}
           </div>
+
+          {showCollectionPicker && collectionTarget && (
+            <div className="collection-picker-overlay">
+              <div className="collection-picker">
+                <h3>¿A qué colección la guardas?</h3>
+                {showCollectionForm ? (
+                  <form
+                    className="form-card"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void createCollection();
+                    }}
+                  >
+                    <input
+                      value={newCollectionName}
+                      onChange={(event) => setNewCollectionName(event.target.value)}
+                      placeholder="Nombre de la colección"
+                      aria-label="Nombre de la colección"
+                    />
+                    <textarea
+                      value={newCollectionDescription}
+                      onChange={(event) => setNewCollectionDescription(event.target.value)}
+                      placeholder="Descripción opcional"
+                      aria-label="Descripción de la colección"
+                    />
+                    <div className="collection-form-actions">
+                      <button className="small-button" type="submit">
+                        Crear
+                      </button>
+                      <button
+                        className="small-button secondary"
+                        onClick={() => setShowCollectionForm(false)}
+                        type="button"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <>
+                    <div className="collection-picker-list">
+                      {collections.map((collection) => {
+                        const alreadyAdded = collectionTarget
+                          ? collection.recipes.some((recipe) => recipe.title === collectionTarget.title)
+                          : false;
+
+                        return (
+                          <button
+                            key={collection.id}
+                            className={alreadyAdded ? "collection-picker-item selected" : "collection-picker-item"}
+                            onClick={() => {
+                              if (alreadyAdded) return;
+                              void addRecipeToCollection(collection.id, collectionTarget);
+                            }}
+                            type="button"
+                            disabled={alreadyAdded}
+                          >
+                            <span>{collection.name}</span>
+                            <small>{alreadyAdded ? "Ya añadida" : `${collection.recipes.length} recetas`}</small>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      className="small-button secondary full-width"
+                      onClick={() => setShowCollectionForm(true)}
+                      type="button"
+                    >
+                      + Nueva colección
+                    </button>
+                    <button
+                      className="small-button secondary full-width"
+                      onClick={() => {
+                        setCollectionTarget(null);
+                        setShowCollectionPicker(false);
+                        setShowCollectionForm(false);
+                      }}
+                      type="button"
+                    >
+                      Cancelar
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
 
           {view !== "recipe" && (
             <nav className="bottom-nav" aria-label="Navegación principal">
@@ -1211,25 +1616,47 @@ function RecipeCard({
   compact = false,
   onOpen,
   onToggleSaved,
+  onAddToCollection,
+  onRemoveFromCollection,
 }: {
   recipe: RecipeData;
   saved: boolean;
   compact?: boolean;
   onOpen: () => void;
   onToggleSaved: () => void;
+  onAddToCollection?: () => void;
+  onRemoveFromCollection?: () => void;
 }) {
   return (
     <article className={compact ? "recipe-card compact-card" : "recipe-card"}>
       {!compact && (
-        <button
-          aria-label={saved ? "Quitar de guardados" : "Guardar receta"}
-          aria-pressed={saved}
-          className={saved ? "card-bookmark saved" : "card-bookmark"}
-          onClick={onToggleSaved}
-          type="button"
-        >
-          <Bookmark size={17} fill={saved ? "currentColor" : "none"} />
-        </button>
+        <>
+          <button
+            aria-label={saved ? "Quitar de guardados" : "Guardar receta"}
+            aria-pressed={saved}
+            className={saved ? "card-bookmark saved" : "card-bookmark"}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleSaved();
+            }}
+            type="button"
+          >
+            <Bookmark size={17} fill={saved ? "currentColor" : "none"} />
+          </button>
+          {onAddToCollection && (
+            <button
+              aria-label="Añadir a colección"
+              className="card-collection-button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onAddToCollection();
+              }}
+              type="button"
+            >
+              <Plus size={15} />
+            </button>
+          )}
+        </>
       )}
       <button
         aria-label={`Ver ${recipe.title}`}
@@ -1290,9 +1717,22 @@ function RecipeCard({
       </button>
       {compact && (
         <div className="saved-card-footer">
-          <span><Leaf size={14} /> Guardada en esta sesión</span>
-          <button onClick={onToggleSaved} type="button" aria-label="Quitar receta guardada">
+          <span><Leaf size={14} /> {onRemoveFromCollection ? "En esta colección" : "Guardada en esta sesión"}</span>
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              if (onRemoveFromCollection) {
+                onRemoveFromCollection();
+                return;
+              }
+              onToggleSaved();
+            }}
+            type="button"
+            className={onRemoveFromCollection ? "remove-collection-button" : ""}
+            aria-label={onRemoveFromCollection ? "Quitar receta de la colección" : "Quitar receta guardada"}
+          >
             <Bookmark size={16} fill="currentColor" />
+            {onRemoveFromCollection && <span className="remove-collection-badge"><Minus size={10} /></span>}
           </button>
         </div>
       )}
@@ -1314,17 +1754,19 @@ function CollectionCard({
   icon,
   title,
   count,
+  onClick,
 }: {
   icon: string;
   title: string;
   count: string;
+  onClick?: () => void;
 }) {
   return (
-    <div className="collection-card">
+    <button className="collection-card" onClick={onClick} type="button">
       <span className="collection-icon" aria-hidden="true">{icon}</span>
       <strong>{title}</strong>
       <small>{count}</small>
-    </div>
+    </button>
   );
 }
 
@@ -1337,6 +1779,7 @@ function RecipeScreen({
   onComplete,
   onShare,
   onToggleSaved,
+  onAddToCollection,
   onToggleStep,
 }: {
   recipe: RecipeData;
@@ -1347,6 +1790,7 @@ function RecipeScreen({
   onComplete: () => void;
   onShare: () => void;
   onToggleSaved: () => void;
+  onAddToCollection: () => void;
   onToggleStep: (stepIndex: number) => void;
 }) {
   return (
@@ -1369,6 +1813,14 @@ function RecipeScreen({
           type="button"
         >
           <Bookmark size={18} fill={saved ? "currentColor" : "none"} />
+        </button>
+        <button
+          aria-label="Añadir a colección"
+          className="round-icon-button collection-icon-button"
+          onClick={onAddToCollection}
+          type="button"
+        >
+          <Plus size={17} />
         </button>
         <button
           aria-label="Compartir receta"

@@ -653,6 +653,23 @@ input:focus-visible {
   background: #ecfdf5;
 }
 
+.card-collection-button {
+  position: absolute;
+  z-index: 2;
+  top: 9px;
+  right: 64px;
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 80%);
+  border-radius: 9px;
+  color: #fff;
+  background: rgb(255 255 255 / 24%);
+  cursor: pointer;
+  backdrop-filter: blur(5px);
+}
+
 .card-open-link {
   display: flex;
   min-height: 37px;
@@ -665,6 +682,21 @@ input:focus-visible {
   background: var(--green);
   font-size: 10px;
   font-weight: 750;
+}
+
+.explore-highlight {
+  display: flex;
+  min-height: 42px;
+  margin: -6px 0 14px;
+  padding: 10px 12px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #d8f8e7;
+  border-radius: 11px;
+  color: var(--green-dark);
+  background: #eafbf4;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .more-recipes {
@@ -796,6 +828,61 @@ input:focus-visible {
   text-align: left;
 }
 
+.form-card {
+  display: flex;
+  min-height: 150px;
+  padding: 12px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.form-card input,
+.form-card textarea {
+  width: 100%;
+  min-height: 38px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.form-card textarea {
+  min-height: 62px;
+  resize: vertical;
+}
+
+.collection-form-actions {
+  display: flex;
+  margin-top: 2px;
+  gap: 8px;
+}
+
+.small-button {
+  display: inline-flex;
+  min-height: 34px;
+  padding: 0 12px;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 9px;
+  color: #fff;
+  background: var(--green);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.small-button.secondary {
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+}
+
 .collection-icon {
   display: grid;
   width: 25px;
@@ -829,6 +916,147 @@ input:focus-visible {
 
 .new-collection svg {
   margin-bottom: 5px;
+}
+
+.collection-icon-button {
+  color: var(--green-dark);
+  background: #ecfdf5;
+}
+
+.collection-detail-view {
+  display: grid;
+  gap: 12px;
+}
+
+.collection-detail-header {
+  margin-bottom: 0;
+}
+
+.collection-picker-overlay {
+  position: fixed;
+  z-index: 15;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgb(15 23 42 / 28%);
+}
+
+.collection-picker {
+  width: min(100%, 360px);
+  padding: 18px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 50px rgb(15 23 42 / 18%);
+}
+
+.collection-picker h3 {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.collection-picker-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.collection-picker-item {
+  display: flex;
+  min-height: 42px;
+  padding: 10px 12px;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid #cfeadf;
+  border-radius: 10px;
+  background: #f5fff9;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  transition: opacity 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+}
+
+.collection-picker-item:hover:not(:disabled) {
+  border-color: #8dd4ad;
+  transform: translateY(-1px);
+}
+
+.collection-picker-item:disabled {
+  opacity: 0.52;
+  cursor: default;
+  border-color: #dfe7e2;
+  background: #eef2f1;
+}
+
+.collection-picker-item.selected {
+  opacity: 0.7;
+  background: #edf1ef;
+  border-color: #d5ddd9;
+}
+
+.collection-picker-item small {
+  color: var(--muted);
+}
+
+.collection-picker-item:disabled small {
+  color: #6e7b7c;
+}
+
+.saved-card-footer {
+  display: flex;
+  min-height: 42px;
+  padding: 0 10px 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--green-dark);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.saved-card-footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.saved-card-footer button {
+  position: relative;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: #eafbf4;
+  color: var(--green-dark);
+  cursor: pointer;
+}
+
+.remove-collection-button {
+  background: #ffe7e7;
+  color: #b42318;
+}
+
+.remove-collection-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -2px;
+  display: grid;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #b42318;
+  color: #fff;
+}
+
+.full-width {
+  width: 100%;
+  flex: 1 1 auto;
 }
 
 .recent-heading {
