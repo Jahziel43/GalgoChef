@@ -15,6 +15,53 @@ export interface RecipeData {
   imageSourceUrl?: string;
 }
 
+const ingredientAliasMap: Record<string, string> = {
+  aceite: "aceite de oliva",
+  "aceite de olivo": "aceite de oliva",
+  "aceite de oliva": "aceite de oliva",
+  "aceite virgen extra": "aceite de oliva",
+  "aceite extra virgen": "aceite de oliva",
+  sal: "sal",
+  "sal de mesa": "sal",
+  "sal kosher": "sal",
+  "sal marina": "sal",
+};
+
+const canonicalIngredientLabels: Record<string, string> = {
+  "aceite de oliva": "Aceite de oliva",
+  sal: "Sal",
+};
+
+export function normalizeRecipeIngredientKey(value: string) {
+  const base = value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("es")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return ingredientAliasMap[base] ?? base;
+}
+
+export function dedupeRecipeStrings(values: string[]) {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const value of values) {
+    const cleaned = value.trim();
+    if (!cleaned) continue;
+
+    const key = normalizeRecipeIngredientKey(cleaned);
+    if (!key || seen.has(key)) continue;
+
+    seen.add(key);
+    deduped.push(canonicalIngredientLabels[key] ?? cleaned);
+  }
+
+  return deduped;
+}
+
 export function isRecipeData(value: unknown): value is RecipeData {
   if (typeof value !== "object" || value === null) return false;
 

@@ -30,7 +30,12 @@ import {
   type AllergyId,
   type IntoleranceId,
 } from "@/lib/dietary";
-import { isRecipeData, type RecipeData } from "@/lib/recipe";
+import {
+  dedupeRecipeStrings,
+  isRecipeData,
+  normalizeRecipeIngredientKey,
+  type RecipeData,
+} from "@/lib/recipe";
 
 type Tab = "pantry" | "explore" | "saved" | "account";
 type CollectionData = {
@@ -47,13 +52,14 @@ type ProfileData = {
   allergies: AllergyId[];
   intolerances: IntoleranceId[];
 };
-type PantryCategory = "Verduras" | "Proteínas" | "Lácteos" | "Otros";
+type PantryCategory = string;
 type PantryIngredient = {
   name: string;
   category: PantryCategory;
+  emoji?: string;
 };
 
-const pantryIngredients: PantryIngredient[] = (
+const fallbackPantryIngredients: PantryIngredient[] = (
   [
     { name: "Huevos", category: "Proteínas" },
     { name: "Espinaca", category: "Verduras" },
@@ -105,9 +111,6 @@ const pantryIngredients: PantryIngredient[] = (
     ingredients.findIndex((candidate) => candidate.name === ingredient.name) === index,
 );
 
-const filters = ["Todos", "Verduras", "Proteínas", "Lácteos", "Otros"] as const;
-type PantryFilter = (typeof filters)[number];
-
 const sampleRecipes: RecipeData[] = [
   {
     title: "Omelette de espinaca y tomate",
@@ -151,11 +154,12 @@ const sampleRecipes: RecipeData[] = [
 ];
 
 export default function Home() {
-  const [tab, setTab] = useState<Tab>("pantry");
-  const [filter, setFilter] = useState<PantryFilter>("Todos");
+  const [tab, setTab] = useState<Tab>("account");
+  const [filter, setFilter] = useState<string>("Todos");
   const [search, setSearch] = useState("");
   const [showMoreRecipes, setShowMoreRecipes] = useState(false);
   const [selectedIngredients, setSelectedIngredients] = useState<string[]>([]);
+  const [pantryIngredients, setPantryIngredients] = useState<PantryIngredient[]>(fallbackPantryIngredients);
   const [view, setView] = useState<"pantry" | "loading" | "recipe">("pantry");
   const [recipe, setRecipe] = useState<RecipeData | null>(null);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
@@ -179,6 +183,7 @@ export default function Home() {
 
   useEffect(() => {
     void loadSession();
+    void loadPantryIngredients();
   }, []);
 
   useEffect(() => {
@@ -192,6 +197,48 @@ export default function Home() {
       setCollections([]);
     }
   }, [profile]);
+
+  async function loadPantryIngredients() {
+    try {
+      const response = await fetch("/api/ingredients");
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudieron cargar los ingredientes."));
+      }
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "ingredients" in data &&
+        Array.isArray(data.ingredients)
+      ) {
+        const nextIngredients = data.ingredients
+          .filter(
+            (ingredient): ingredient is PantryIngredient =>
+              typeof ingredient === "object" &&
+              ingredient !== null &&
+              typeof (ingredient as { name?: unknown }).name === "string" &&
+              typeof (ingredient as { category?: unknown }).category === "string",
+          )
+          .map((ingredient) => ({
+            name: ingredient.name,
+            category: ingredient.category,
+            emoji: (ingredient as { emoji?: string }).emoji,
+          }));
+
+        if (nextIngredients.length > 0) {
+          setPantryIngredients(nextIngredients);
+          return;
+        }
+      }
+
+      setPantryIngredients(fallbackPantryIngredients);
+    } catch (cause) {
+      setPantryIngredients(fallbackPantryIngredients);
+      console.warn(
+        cause instanceof Error ? cause.message : "No se pudo cargar la despensa.",
+      );
+    }
+  }
 
   async function loadSession() {
     try {
@@ -408,23 +455,80 @@ export default function Home() {
     setShowCollectionForm(false);
   }
 
-  function toggleIngredient(ingredient: string) {
-    setSelectedIngredients((current) =>
-      current.includes(ingredient)
-        ? current.filter((item) => item !== ingredient)
-        : [...current, ingredient],
-    );
+  function ingredientSelectionKey(value: string) {
+    return value
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLocaleLowerCase("es")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
-  function addCustomIngredient(event: React.FormEvent<HTMLFormElement>) {
+  function dedupeIngredientSelection(values: string[]) {
+    const unique = new Map<string, string>();
+    for (const value of values) {
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      const key = ingredientSelectionKey(trimmed);
+      if (!key) continue;
+      if (!unique.has(key)) {
+        unique.set(key, trimmed);
+      }
+    }
+    return [...unique.values()];
+  }
+
+  function toggleIngredient(ingredient: string) {
+    setSelectedIngredients((current) => {
+      const next = current.includes(ingredient)
+        ? current.filter((item) => item !== ingredient)
+        : [...current, ingredient];
+      return dedupeIngredientSelection(next);
+    });
+  }
+
+  async function addCustomIngredient(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const ingredient = search.trim();
     if (!ingredient) return;
 
-    if (!selectedIngredients.includes(ingredient)) {
-      setSelectedIngredients((current) => [...current, ingredient]);
+    try {
+      const response = await fetch("/api/ingredients", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: ingredient }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo añadir el ingrediente."));
+      }
+
+      const nextSelected = dedupeIngredientSelection([
+        ...selectedIngredients,
+        ingredient,
+      ]);
+      setSelectedIngredients(nextSelected);
+
+      if (typeof data === "object" && data !== null && "queued" in data && data.queued === true) {
+        setNotice("Ingrediente añadido a la cola de revisión.");
+      } else if (typeof data === "object" && data !== null && "exists" in data && data.exists === true) {
+        setNotice("Este ingrediente ya existe en la despensa.");
+      } else if (typeof data === "object" && data !== null && "processing" in data && data.processing === true) {
+        setNotice("Listo: se está consolidando la lista en segundo plano.");
+      } else {
+        setNotice("Ingrediente agregado correctamente.");
+      }
+
+      if (!(typeof data === "object" && data !== null && "processing" in data && data.processing === true)) {
+        await loadPantryIngredients();
+      }
+      setSearch("");
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "No se pudo añadir el ingrediente.",
+      );
     }
-    setSearch("");
   }
 
   async function generateRecipe(ingredients = selectedIngredients) {
@@ -472,10 +576,44 @@ export default function Home() {
         throw new Error("Recibimos una receta en un formato inesperado.");
       }
 
+      const normalizedRecipe: RecipeData = {
+        ...data,
+        usedIngredients: dedupeRecipeStrings(data.usedIngredients),
+        steps: dedupeRecipeStrings(data.steps),
+      };
+
+      try {
+        if (profile) {
+          const saveResponse = await fetch("/api/recipes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ recipe: normalizedRecipe }),
+          });
+          const saveData: unknown = await saveResponse.json();
+          if (!saveResponse.ok) {
+            console.warn("Generated recipe persistence failed:", getResponseError(saveData, "No se pudo guardar la receta."));
+          }
+        }
+      } catch (saveError) {
+        console.warn("Generated recipe persistence error:", saveError);
+      }
+
       await new Promise((resolve) => window.setTimeout(resolve, 2500));
       if (generationId.current !== requestId) return;
-      setRecipe(data);
+      setRecipe(normalizedRecipe);
       setCompletedSteps([]);
+      setSavedRecipes((current) =>
+        current.includes(normalizedRecipe.title)
+          ? current
+          : current.concat(normalizedRecipe.title),
+      );
+      setSavedRecipeData((current) =>
+        current.some((item) => item.title === normalizedRecipe.title)
+          ? current
+          : [normalizedRecipe, ...current],
+      );
+      await loadExploreRecipes();
+      setShowMoreRecipes(true);
       setView("recipe");
     } catch (cause) {
       if (generationId.current !== requestId) return;
@@ -634,6 +772,27 @@ export default function Home() {
   }
 
   const recipeSaved = recipe ? savedRecipes.includes(recipe.title) : false;
+  const pantryFilters = [
+    "Todos",
+    ...Array.from(
+      new Set(
+        pantryIngredients
+          .map((ingredient) => ingredient.category)
+          .filter((category): category is string => Boolean(category)),
+      ),
+    )
+      .filter((category) => category !== "Otros")
+      .sort((left, right) => left.localeCompare(right, "es", { sensitivity: "base" })),
+    ...(Array.from(
+      new Set(
+        pantryIngredients
+          .map((ingredient) => ingredient.category)
+          .filter((category): category is string => Boolean(category)),
+      ),
+    ).includes("Otros")
+      ? ["Otros"]
+      : []),
+  ];
   const filteredIngredients = pantryIngredients.filter((ingredient) => {
     const categoryMatches =
       filter === "Todos" || ingredient.category === filter;
@@ -774,8 +933,25 @@ export default function Home() {
                   )}
                 </form>
 
-                <div className="filter-chips" aria-label="Filtrar ingredientes">
-                  {filters.map((item) => (
+                <div
+                  aria-label="Filtrar ingredientes"
+                  className="filter-chips"
+                  onWheel={(event) => {
+                    const element = event.currentTarget;
+                    const atLeftEdge = element.scrollLeft <= 0 && event.deltaY < 0;
+                    const atRightEdge =
+                      element.scrollLeft + element.clientWidth >= element.scrollWidth - 2 &&
+                      event.deltaY > 0;
+
+                    if (atLeftEdge || atRightEdge) {
+                      return;
+                    }
+
+                    event.preventDefault();
+                    element.scrollLeft += event.deltaY;
+                  }}
+                >
+                  {pantryFilters.map((item) => (
                     <button
                       aria-pressed={filter === item}
                       className={
@@ -1886,6 +2062,17 @@ function RecipeDetailContent({
     { name: "Carbohidratos", value: recipe.macros.carbs, color: "carbs" },
     { name: "Grasas", value: recipe.macros.fats, color: "fats" },
   ];
+  const hasOliveOil = recipe.usedIngredients.some(
+    (ingredient) => normalizeRecipeIngredientKey(ingredient) === "aceite de oliva",
+  );
+  const hasSalt = recipe.usedIngredients.some(
+    (ingredient) => normalizeRecipeIngredientKey(ingredient) === "sal",
+  );
+  const checklistIngredients = dedupeRecipeStrings([
+    ...recipe.usedIngredients,
+    ...(hasOliveOil ? [] : ["Aceite de oliva"]),
+    ...(hasSalt ? [] : ["Sal"]),
+  ]);
 
   return (
     <>
@@ -1911,36 +2098,37 @@ function RecipeDetailContent({
           <span>{recipe.usedIngredients.length} en la receta</span>
         </div>
         <div className="checklist-grid">
-          {[...recipe.usedIngredients, "Aceite de oliva", "Sal"].map(
-            (ingredient, index) => {
-              const checked =
-                index < recipe.usedIngredients.length
-                  ? !uncheckedIngredients.includes(ingredient)
-                  : uncheckedIngredients.includes(ingredient);
-              return (
-                <button
-                  aria-pressed={checked}
-                  className={
-                    checked
-                      ? "checklist-item checked"
-                      : "checklist-item unchecked"
-                  }
-                  key={`${ingredient}-${index}`}
-                  onClick={() =>
-                    setUncheckedIngredients((current) =>
-                      current.includes(ingredient)
-                        ? current.filter((item) => item !== ingredient)
-                        : [...current, ingredient],
-                    )
-                  }
-                  type="button"
-                >
-                  {checked ? <Check size={15} /> : <span className="empty-check" />}
-                  {ingredient.replace(/^\d+\s*/, "")}
-                </button>
-              );
-            },
-          )}
+          {checklistIngredients.map((ingredient) => {
+            const isRecipeIngredient = recipe.usedIngredients.some(
+              (item) => dedupeRecipeStrings([item, ingredient]).length === 1,
+            );
+            const checked = isRecipeIngredient
+              ? !uncheckedIngredients.includes(ingredient)
+              : uncheckedIngredients.includes(ingredient);
+
+            return (
+              <button
+                aria-pressed={checked}
+                className={
+                  checked
+                    ? "checklist-item checked"
+                    : "checklist-item unchecked"
+                }
+                key={ingredient}
+                onClick={() =>
+                  setUncheckedIngredients((current) =>
+                    current.includes(ingredient)
+                      ? current.filter((item) => item !== ingredient)
+                      : [...current, ingredient],
+                  )
+                }
+                type="button"
+              >
+                {checked ? <Check size={15} /> : <span className="empty-check" />}
+                {ingredient.replace(/^\d+\s*/, "")}
+              </button>
+            );
+          })}
         </div>
       </section>
       <section className="detail-section preparation-section" id="preparation">

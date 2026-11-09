@@ -167,8 +167,17 @@ input:focus-visible {
   margin: 12px -18px 20px;
   padding: 0 18px 3px;
   overflow-x: auto;
+  overflow-y: hidden;
   gap: 7px;
   scrollbar-width: none;
+  scroll-snap-type: x proximity;
+  white-space: nowrap;
+  overscroll-behavior-x: contain;
+  cursor: grab;
+}
+
+.filter-chips:active {
+  cursor: grabbing;
 }
 
 .filter-chips::-webkit-scrollbar {

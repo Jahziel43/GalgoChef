@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { findDietaryConflicts } from "@/lib/dietary";
-import { isRecipeData, type RecipeData } from "@/lib/recipe";
+import { dedupeRecipeStrings, isRecipeData, type RecipeData } from "@/lib/recipe";
 import { getAuthenticatedProfile } from "@/lib/supabase/profile";
 
 function recipeToApiShape(row: Record<string, unknown>): RecipeData {
@@ -143,6 +143,9 @@ export async function POST(request: Request) {
     );
   }
 
+  const sanitizedUsedIngredients = dedupeRecipeStrings(record.usedIngredients).slice(0, 20);
+  const sanitizedSteps = dedupeRecipeStrings(record.steps).slice(0, 12);
+
   const recipeRecord = {
     title: record.title.trim(),
     description: record.title.trim(),
@@ -153,8 +156,8 @@ export async function POST(request: Request) {
       carbs: record.macros.carbs,
       fats: record.macros.fats,
     },
-    used_ingredients: record.usedIngredients,
-    steps: record.steps,
+    used_ingredients: sanitizedUsedIngredients,
+    steps: sanitizedSteps,
     image_url: record.imageUrl ?? null,
     image_photographer: record.imagePhotographer ?? null,
     image_source_url: record.imageSourceUrl ?? null,

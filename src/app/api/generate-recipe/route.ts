@@ -8,6 +8,7 @@ import {
   intoleranceOptions,
   normalizeDietaryText,
 } from "@/lib/dietary";
+import { dedupeRecipeStrings } from "@/lib/recipe";
 import { getAuthenticatedProfile } from "@/lib/supabase/profile";
 import type { RecipeData } from "@/lib/recipe";
 
@@ -719,12 +720,49 @@ export async function POST(request: Request) {
 
     const recipe: RecipeData = {
       ...generated,
+      usedIngredients: dedupeRecipeStrings(generated.usedIngredients).slice(0, 20),
+      steps: dedupeRecipeStrings(generated.steps).slice(0, 12),
       matchPercentage: Math.min(
         99,
         Math.round((matchedIngredients.length / uniqueIngredients.length) * 100),
       ),
       ...(await findRecipeImage(generated.title, generated.usedIngredients)),
     };
+
+    try {
+      const { supabase, user, error } = await getAuthenticatedProfile();
+      if (!error && user) {
+        const { error: saveError } = await supabase
+          .from("recipes")
+          .upsert(
+            {
+              title: recipe.title.trim(),
+              description: recipe.title.trim(),
+              prep_time: recipe.prepTime,
+              calories: recipe.calories,
+              macros: {
+                protein: recipe.macros.protein,
+                carbs: recipe.macros.carbs,
+                fats: recipe.macros.fats,
+              },
+              used_ingredients: recipe.usedIngredients,
+              steps: recipe.steps,
+              image_url: recipe.imageUrl ?? null,
+              image_photographer: recipe.imagePhotographer ?? null,
+              image_source_url: recipe.imageSourceUrl ?? null,
+              match_percentage: recipe.matchPercentage,
+              created_by: user.id,
+            },
+            { onConflict: "title" },
+          );
+
+        if (saveError) {
+          console.warn("Generated recipe persistence failed:", saveError.code, saveError.message);
+        }
+      }
+    } catch (saveError) {
+      console.warn("Generated recipe persistence error:", saveError);
+    }
 
     return NextResponse.json(recipe);
   } catch (error) {
