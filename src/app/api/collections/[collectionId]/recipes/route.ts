@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isRecipeData, type RecipeData } from "@/lib/recipe";
 import { getAuthenticatedProfile } from "@/lib/supabase/profile";
+import { stabilizeRecipeImage } from "@/lib/supabase/recipe-images";
 
 export async function POST(
   request: Request,
@@ -51,6 +52,7 @@ export async function POST(
   let recipeId: string | null = null;
   if (isRecipeData(recipeInput)) {
     const recipe = recipeInput as RecipeData;
+    const imageUrl = await stabilizeRecipeImage(recipe.imageUrl);
     const { data: recipeData, error: recipeError } = await supabase
       .from("recipes")
       .upsert(
@@ -62,7 +64,7 @@ export async function POST(
           macros: { protein: recipe.macros.protein, carbs: recipe.macros.carbs, fats: recipe.macros.fats },
           used_ingredients: recipe.usedIngredients,
           steps: recipe.steps,
-          image_url: recipe.imageUrl ?? null,
+          image_url: imageUrl ?? null,
           image_photographer: recipe.imagePhotographer ?? null,
           image_source_url: recipe.imageSourceUrl ?? null,
           match_percentage: recipe.matchPercentage,

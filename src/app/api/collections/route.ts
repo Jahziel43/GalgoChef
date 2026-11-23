@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getAuthenticatedProfile } from "@/lib/supabase/profile";
+import { stabilizeRecipeImage } from "@/lib/supabase/recipe-images";
 
 function shapeRecipe(row: Record<string, unknown>) {
   const macros =
@@ -103,15 +105,38 @@ export async function GET() {
     itemsByCollection.set(item.collection_id, list);
   }
 
-  return NextResponse.json({
-    collections: (collections ?? []).map((collection) => ({
+  const shapedCollections = await Promise.all(
+    (collections ?? []).map(async (collection) => ({
       id: collection.id,
       name: collection.name,
       description: collection.description,
       createdAt: collection.created_at,
-      recipes: (itemsByCollection.get(collection.id) ?? []).map((row) => shapeRecipe(row)),
+      recipes: await Promise.all(
+        (itemsByCollection.get(collection.id) ?? []).map(async (row) => {
+          const recipe = shapeRecipe(row);
+          const originalImageUrl = recipe.imageUrl;
+          recipe.imageUrl = await stabilizeRecipeImage(originalImageUrl);
+          if (row.id && originalImageUrl !== recipe.imageUrl) {
+            const { error: updateError } = await createSupabaseAdminClient()
+              .from("recipes")
+              .update({
+                image_url: recipe.imageUrl ?? null,
+                ...(recipe.imageUrl
+                  ? {}
+                  : { image_photographer: null, image_source_url: null }),
+              })
+              .eq("id", row.id);
+            if (updateError) {
+              console.warn("Collection recipe image URL update failed:", updateError.code);
+            }
+          }
+          return recipe;
+        }),
+      ),
     })),
-  });
+  );
+
+  return NextResponse.json({ collections: shapedCollections });
 }
 
 export async function POST(request: Request) {

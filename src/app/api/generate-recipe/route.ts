@@ -3,6 +3,7 @@ import {
   allergyOptions,
   dietaryLabels,
   findDietaryConflicts,
+  findNamedDietaryConflicts,
   isAllergyId,
   isIntoleranceId,
   intoleranceOptions,
@@ -10,6 +11,7 @@ import {
 } from "@/lib/dietary";
 import { dedupeRecipeStrings } from "@/lib/recipe";
 import { getAuthenticatedProfile } from "@/lib/supabase/profile";
+import { persistRecipeImage } from "@/lib/supabase/recipe-images";
 import type { RecipeData } from "@/lib/recipe";
 
 interface GeneratedRecipe {
@@ -20,6 +22,8 @@ interface GeneratedRecipe {
   usedIngredients: string[];
   steps: string[];
 }
+
+const MAX_DEBUG_RESPONSE_LENGTH = 12_000;
 
 function isAllergyList(value: unknown): value is import("@/lib/dietary").AllergyId[] {
   return Array.isArray(value) && value.every(isAllergyId);
@@ -110,7 +114,7 @@ function isGeneratedRecipe(value: unknown): value is GeneratedRecipe {
     ) ||
     !Array.isArray(candidate.steps) ||
     candidate.steps.length < 1 ||
-    candidate.steps.length > 12 ||
+    candidate.steps.length > 6 ||
     !candidate.steps.every(
       (item) => typeof item === "string" && item.length > 0 && item.length <= 400,
     )
@@ -128,48 +132,149 @@ function isGeneratedRecipe(value: unknown): value is GeneratedRecipe {
   );
 }
 
-function parseRecipeJson(raw: unknown): unknown {
-  const text = typeof raw === "string" ? raw : raw == null ? "" : JSON.stringify(raw);
-  const trimmed = text.trim();
-  if (!trimmed) throw new Error("Empty recipe output");
+function parseNumericField(value: unknown) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? Math.round(value) : undefined;
+  }
+  if (typeof value !== "string") return undefined;
 
-  const candidates = [
-    trimmed
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```\s*$/i, "")
-      .trim(),
-  ];
+  const trimmed = value.trim();
+  const thousandsMatch = trimmed.match(/^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?/);
+  const match = thousandsMatch ?? trimmed.match(/^-?\d+(?:[.,]\d+)?/);
+  if (!match) return undefined;
 
-  const firstObject = trimmed.search(/[\[{]/);
-  const lastObject = trimmed.search(/[\]}]/);
-  if (firstObject !== -1) {
-    const endIndex = Math.max(
-      trimmed.lastIndexOf("}"),
-      trimmed.lastIndexOf("]"),
-    );
-    if (endIndex > firstObject) {
-      candidates.push(trimmed.slice(firstObject, endIndex + 1));
+  const normalized = thousandsMatch
+    ? match[0].replaceAll(",", "")
+    : match[0].replace(",", ".");
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? Math.round(parsed) : undefined;
+}
+
+function normalizeGeneratedRecipe(value: unknown): GeneratedRecipe | null {
+  if (typeof value !== "object" || value === null) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.macros !== "object" || candidate.macros === null) {
+    return null;
+  }
+  const macros = candidate.macros as Record<string, unknown>;
+  const normalized = {
+    ...candidate,
+    calories: parseNumericField(candidate.calories),
+    macros: {
+      protein: parseNumericField(macros.protein),
+      carbs: parseNumericField(macros.carbs),
+      fats: parseNumericField(macros.fats),
+    },
+  };
+  return isGeneratedRecipe(normalized) ? normalized : null;
+}
+
+function validateGeneratedRecipe(
+  recipe: GeneratedRecipe,
+  ingredients: string[],
+  allergies: string[],
+  intolerances: string[],
+  customRestrictions: Array<{ name: string; matchTerms: string[] }>,
+  dislikedIngredients: string[],
+) {
+  const recipeText = [
+    recipe.title,
+    ...recipe.usedIngredients,
+    ...recipe.steps,
+  ].join(" ");
+  const resultConflicts = findDietaryConflicts(
+    recipeText,
+    allergies,
+    intolerances,
+  );
+  const customResultConflicts = findNamedDietaryConflicts(
+    recipeText,
+    customRestrictions,
+  );
+  const dislikedResultConflicts = findNamedDietaryConflicts(
+    [recipe.title, ...recipe.usedIngredients].join(" "),
+    dislikedIngredients.map((name) => ({ name, matchTerms: [] })),
+  );
+  const matchedIngredients = ingredients.filter((selected) =>
+    recipe.usedIngredients.some((used) => ingredientWordsMatch(selected, used)),
+  );
+
+  return {
+    resultConflicts,
+    customResultConflicts,
+    dislikedResultConflicts,
+    matchedIngredients,
+  };
+}
+
+const MAX_RECIPE_JSON_LENGTH = 2_200;
+
+function extractCompleteGeneratedRecipes(responseText: string) {
+  const recipesArray = responseText.match(/"recipes"\s*:\s*\[/);
+  if (!recipesArray || recipesArray.index === undefined) return [];
+
+  const recipes: GeneratedRecipe[] = [];
+  const start = recipesArray.index + recipesArray[0].length;
+  let objectStart = -1;
+  let objectDepth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < responseText.length; index += 1) {
+    const character = responseText[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (objectDepth === 0) {
+      if (character === "]") break;
+      if (character === "{") {
+        objectStart = index;
+        objectDepth = 1;
+      }
+      continue;
+    }
+
+    if (character === "{") objectDepth += 1;
+    if (character === "}") {
+      objectDepth -= 1;
+      if (objectDepth === 0 && objectStart >= 0) {
+        try {
+          const parsed: unknown = JSON.parse(responseText.slice(objectStart, index + 1));
+          const normalized = normalizeGeneratedRecipe(parsed);
+          if (normalized && JSON.stringify(parsed).length <= MAX_RECIPE_JSON_LENGTH) {
+            recipes.push(normalized);
+          }
+        } catch {
+          // Ignore incomplete or malformed recipe objects and keep completed ones.
+        }
+        objectStart = -1;
+      }
     }
   }
 
-  for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      // keep trying
+  const uniqueRecipes = new Map<string, GeneratedRecipe>();
+  for (const recipe of recipes) {
+    const titleKey = normalizeDietaryText(recipe.title)
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (titleKey && !uniqueRecipes.has(titleKey)) {
+      uniqueRecipes.set(titleKey, recipe);
     }
   }
-
-  const match = trimmed.match(/\{[\s\S]*\}/);
-  if (match) {
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      // no-op
-    }
-  }
-
-  throw new Error("Recipe output is not valid JSON");
+  return [...uniqueRecipes.values()];
 }
 
 function getGeminiModelCandidates() {
@@ -218,6 +323,7 @@ async function callGeminiRecipeEndpoint(
   baseUrl: string,
   model: string,
   userPrompt: string,
+  maxOutputTokens: number,
 ) {
   const response = await fetch(
     `${baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
@@ -243,7 +349,7 @@ async function callGeminiRecipeEndpoint(
         ],
         generationConfig: {
           temperature: 0.2,
-          maxOutputTokens: 512,
+          maxOutputTokens,
           topP: 0.8,
           candidateCount: 1,
           responseMimeType: "application/json",
@@ -265,6 +371,94 @@ async function callGeminiRecipeEndpoint(
   }
 
   return { response, payload };
+}
+
+async function requestRecipeResponse(
+  apiKey: string,
+  baseUrl: string,
+  modelsToTry: string[],
+  userPrompt: string,
+  maxOutputTokens: number,
+) {
+  let messageContent: string | null = null;
+  let lastGeminiError: string | null = null;
+
+  for (const candidateModel of modelsToTry) {
+    let lastAttemptFailed = false;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const { response, payload } = await callGeminiRecipeEndpoint(
+        apiKey,
+        baseUrl,
+        candidateModel,
+        userPrompt,
+        maxOutputTokens,
+      );
+
+      if (response.ok) {
+        const result: unknown = payload;
+        messageContent =
+          typeof result === "object" &&
+          result !== null &&
+          "candidates" in result &&
+          Array.isArray(result.candidates) &&
+          result.candidates.length > 0 &&
+          typeof result.candidates[0] === "object" &&
+          result.candidates[0] !== null &&
+          "content" in result.candidates[0] &&
+          typeof result.candidates[0].content === "object" &&
+          result.candidates[0].content !== null &&
+          "parts" in result.candidates[0].content &&
+          Array.isArray(result.candidates[0].content.parts)
+            ? result.candidates[0].content.parts
+                .map((part: unknown) =>
+                  typeof part === "object" &&
+                  part !== null &&
+                  "text" in part &&
+                  typeof part.text === "string"
+                    ? part.text
+                    : "",
+                )
+                .join("")
+            : null;
+
+        if (messageContent) {
+          return { messageContent, lastGeminiError };
+        }
+
+        lastAttemptFailed = true;
+        console.warn(`Gemini model ${candidateModel} responded but returned empty content.`);
+        break;
+      }
+
+      const quotaExceeded = isGeminiQuotaError(response, payload);
+      const missingModel =
+        response.status === 404 ||
+        /not found|no longer available/i.test(JSON.stringify(payload ?? {}));
+      const retryable = isRetryableGeminiFailure(response, payload);
+      lastGeminiError = `Gemini model ${candidateModel} failed with status ${response.status}.`;
+
+      if (retryable && attempt === 0) {
+        console.warn(`${lastGeminiError} Retrying once for transient provider error.`, {
+          payload,
+        });
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
+
+      if (quotaExceeded || missingModel) {
+        console.warn(lastGeminiError, { payload });
+      } else {
+        console.error(lastGeminiError, { payload });
+      }
+      lastAttemptFailed = true;
+      break;
+    }
+
+    if (!lastAttemptFailed) break;
+  }
+
+  return { messageContent, lastGeminiError };
 }
 
 function sanitizeImageQuery(value: string) {
@@ -461,6 +655,66 @@ export async function POST(request: Request) {
 
   const requestBody = body as Record<string, unknown>;
   if (
+    ("customRestrictions" in requestBody &&
+      (!Array.isArray(requestBody.customRestrictions) ||
+        !requestBody.customRestrictions.every(
+          (item) =>
+            typeof item === "object" &&
+            item !== null &&
+            "name" in item &&
+            typeof item.name === "string" &&
+            item.name.length <= 100 &&
+            "matchTerms" in item &&
+            Array.isArray(item.matchTerms) &&
+            item.matchTerms.length <= 30 &&
+            item.matchTerms.every(
+              (term: unknown) => typeof term === "string" && term.length <= 100,
+            ),
+        ))) ||
+    ("dislikedIngredients" in requestBody &&
+      (!Array.isArray(requestBody.dislikedIngredients) ||
+        requestBody.dislikedIngredients.length > 100 ||
+        !requestBody.dislikedIngredients.every(
+          (item) => typeof item === "string" && item.length <= 100,
+        )))
+  ) {
+    return NextResponse.json(
+      { error: "Las restricciones personalizadas tienen un formato incorrecto." },
+      { status: 400 },
+    );
+  }
+  const requestedCustomRestrictions =
+    "customRestrictions" in requestBody &&
+    Array.isArray(requestBody.customRestrictions) &&
+    requestBody.customRestrictions.every(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        "name" in item &&
+        typeof item.name === "string" &&
+        "matchTerms" in item &&
+        Array.isArray(item.matchTerms) &&
+        item.matchTerms.every((term: unknown) => typeof term === "string"),
+    )
+      ? requestBody.customRestrictions.map((item) => {
+          const restriction = item as { name: string; matchTerms: string[] };
+          return {
+            name: restriction.name.slice(0, 100),
+            matchTerms: restriction.matchTerms.slice(0, 30).map((term) => term.slice(0, 100)),
+          };
+        })
+      : [];
+  const requestedDislikedIngredients =
+    "dislikedIngredients" in requestBody &&
+    Array.isArray(requestBody.dislikedIngredients) &&
+    requestBody.dislikedIngredients.every(
+      (item) => typeof item === "string" && item.length <= 100,
+    )
+      ? requestBody.dislikedIngredients.slice(0, 100)
+      : [];
+  let customRestrictions = requestedCustomRestrictions;
+  let dislikedIngredients = requestedDislikedIngredients;
+  if (
     "allergies" in requestBody &&
     (!isAllergyList(requestBody.allergies) ||
       requestBody.allergies.length > allergyOptions.length)
@@ -488,7 +742,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { profile, user, error } = await getAuthenticatedProfile();
+    const { profile, supabase, user, error } = await getAuthenticatedProfile();
     if (error) {
       console.error("Supabase profile lookup failed:", error.code);
       return NextResponse.json(
@@ -506,6 +760,37 @@ export async function POST(request: Request) {
       allergies = profile.allergies;
       intolerances = profile.intolerances;
     }
+    if (user) {
+      const { data: preferences, error: preferencesError } = await supabase
+        .from("user_dietary_preferences")
+        .select("option_id")
+        .eq("user_id", user.id);
+      if (preferencesError) throw preferencesError;
+      const optionIds = (preferences ?? []).map((preference) => preference.option_id);
+      if (optionIds.length > 0) {
+        const legacyOptionIds = new Set([
+          ...allergyOptions.map((option) => `allergy:${option.id}`),
+          ...intoleranceOptions.map((option) => `intolerance:${option.id}`),
+        ]);
+        const { data: options, error: optionsError } = await supabase
+          .from("dietary_options")
+          .select("id, name, type, match_terms")
+          .in("id", optionIds);
+        if (optionsError) throw optionsError;
+        customRestrictions = (options ?? [])
+          .filter((option) => option.type !== "dislike" && !legacyOptionIds.has(option.id))
+          .map((option) => ({
+            name: option.name,
+            matchTerms: option.match_terms ?? [],
+          }));
+        dislikedIngredients = (options ?? [])
+          .filter((option) => option.type === "dislike")
+          .flatMap((option) => [option.name, ...(option.match_terms ?? [])]);
+      } else {
+        customRestrictions = [];
+        dislikedIngredients = [];
+      }
+    }
   } catch (error) {
     console.error(
       "Dietary profile configuration error:",
@@ -522,10 +807,22 @@ export async function POST(request: Request) {
     allergies,
     intolerances,
   );
-  if (inputConflicts.length) {
+  const customInputConflicts = findNamedDietaryConflicts(
+    uniqueIngredients.join(", "),
+    customRestrictions,
+  );
+  const dislikedInputConflicts = findNamedDietaryConflicts(
+    uniqueIngredients.join(", "),
+    dislikedIngredients.map((name) => ({ name, matchTerms: [] })),
+  );
+  if (inputConflicts.length || customInputConflicts.length || dislikedInputConflicts.length) {
     return NextResponse.json(
       {
-        error: `La selección incluye ingredientes que podrían coincidir con tus restricciones: ${dietaryLabels(inputConflicts).join(", ")}. Revisa los ingredientes antes de continuar.`,
+        error: `La selección incluye ingredientes que podrían coincidir con tus restricciones: ${[
+          ...dietaryLabels(inputConflicts),
+          ...customInputConflicts.map((item) => item.name),
+          ...dislikedInputConflicts.map((item) => item.name),
+        ].join(", ")}. Revisa los ingredientes antes de continuar.`,
       },
       { status: 422 },
     );
@@ -556,15 +853,22 @@ export async function POST(request: Request) {
       ingredients: uniqueIngredients,
       allergies: allergyNames,
       intolerances: intoleranceNames,
+      customRestrictions,
+      dislikedIngredients: [...new Set(dislikedIngredients)],
     };
 
     const userPrompt = [
-      "Genera una receta realista en español.",
+      "Genera exactamente 3 recetas realistas en español, diferentes entre sí y sin repetir platos.",
       `Ingredientes disponibles: ${recipeRequest.ingredients.join(", ") || "ninguno"}.`,
       `Restricciones: alergias ${recipeRequest.allergies.length ? recipeRequest.allergies.join(", ") : "ninguna"}; intolerancias ${recipeRequest.intolerances.length ? recipeRequest.intolerances.join(", ") : "ninguna"}.`,
-      "Usa principalmente estos ingredientes y solo agrega agua, sal y aceite si hace falta.",
+      `Restricciones personalizadas adicionales: ${recipeRequest.customRestrictions.length ? recipeRequest.customRestrictions.map((restriction) => restriction.name).join(", ") : "ninguna"}.`,
+      `No incluyas ingredientes que el usuario indicó que no le gustan: ${recipeRequest.dislikedIngredients.length ? recipeRequest.dislikedIngredients.join(", ") : "ninguno"}.`,
+      "Varía claramente el tipo de plato, la técnica de preparación y la combinación principal de ingredientes en cada receta.",
+      "Usa principalmente los ingredientes disponibles y solo agrega agua, sal y aceite si hace falta.",
       "No menciones alergias ni intolerancias en la receta; solo respétalas.",
-      "Devuelve un único objeto JSON con esta forma: {\"title\":\"string\",\"prepTime\":\"string\",\"calories\":123,\"macros\":{\"protein\":10,\"carbs\":15,\"fats\":8},\"usedIngredients\":[\"ingrediente 1\"],\"steps\":[\"Paso 1\"]}.",
+      "calories, protein, carbs y fats deben ser números enteros JSON, sin unidades ni comillas.",
+      "Limita cada receta a 4 pasos breves y menos de 2200 caracteres.",
+      "Devuelve solo un objeto JSON con una propiedad recipes y exactamente 3 recetas. Cada receta lleva title, prepTime, calories, macros (protein, carbs, fats), usedIngredients y steps.",
       "Sin markdown, sin texto extra, sin validación, sin comentarios, sin triple backticks, sin bloques de código."
     ].join(" ");
 
@@ -580,6 +884,7 @@ export async function POST(request: Request) {
           baseUrl,
           candidateModel,
           userPrompt,
+          3072,
         );
 
         if (response.ok) {
@@ -664,107 +969,216 @@ export async function POST(request: Request) {
       );
     }
 
-    let generated: unknown;
-    try {
-      generated = parseRecipeJson(messageContent);
-    } catch (error) {
-      console.error("AI returned malformed recipe JSON.", {
-        raw: String(messageContent).slice(0, 1200),
+    let responseToParse: string | null = messageContent;
+    let requestedCount = 3;
+    let batchSizeLimit = 3;
+    let generationRound = 0;
+    const generatedTitleKeys = new Set<string>();
+    const excludedTitles: string[] = [];
+    const validatedRecipes: Array<{
+      generatedRecipe: GeneratedRecipe;
+      matchedIngredients: string[];
+    }> = [];
+
+    while (validatedRecipes.length < 3 && generationRound < 5) {
+      generationRound += 1;
+      const currentResponse = responseToParse;
+      if (!currentResponse) break;
+
+      const extractedRecipes = extractCompleteGeneratedRecipes(currentResponse);
+      if (
+        extractedRecipes.length < requestedCount ||
+        currentResponse.length > requestedCount * MAX_RECIPE_JSON_LENGTH
+      ) {
+        console.warn("Gemini returned fewer valid complete recipes than requested.", {
+          requestedCount,
+          completeRecipes: extractedRecipes.length,
+          responseLength: currentResponse.length,
+          responseLimit: requestedCount * MAX_RECIPE_JSON_LENGTH,
+          rawResponse: currentResponse.slice(0, MAX_DEBUG_RESPONSE_LENGTH),
+          truncated: currentResponse.length > MAX_DEBUG_RESPONSE_LENGTH,
+        });
+      }
+
+      for (const candidate of extractedRecipes) {
+        const titleKey = normalizeDietaryText(candidate.title)
+          .replace(/[^\p{L}\p{N}\s]/gu, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!titleKey || generatedTitleKeys.has(titleKey)) continue;
+
+        generatedTitleKeys.add(titleKey);
+        excludedTitles.push(candidate.title);
+        const validation = validateGeneratedRecipe(
+          candidate,
+          uniqueIngredients,
+          allergies,
+          intolerances,
+          customRestrictions,
+          dislikedIngredients,
+        );
+        if (
+          validation.resultConflicts.length > 0 ||
+          validation.customResultConflicts.length > 0 ||
+          validation.dislikedResultConflicts.length > 0 ||
+          validation.matchedIngredients.length === 0
+        ) {
+          console.warn("Rejected a generated recipe that failed validation.", {
+            title: candidate.title,
+            allergyConflicts: validation.resultConflicts,
+            customConflicts: validation.customResultConflicts.map((item) => item.name),
+            dislikedConflicts: validation.dislikedResultConflicts.map((item) => item.name),
+            matchedIngredients: validation.matchedIngredients.length,
+          });
+          continue;
+        }
+
+        validatedRecipes.push({
+          generatedRecipe: candidate,
+          matchedIngredients: validation.matchedIngredients,
+        });
+      }
+
+      if (validatedRecipes.length === 3) break;
+
+      if (extractedRecipes.length < requestedCount) {
+        const smallerBatchSize =
+          extractedRecipes.length || Math.ceil(requestedCount / 2);
+        batchSizeLimit = Math.max(1, Math.min(batchSizeLimit, smallerBatchSize));
+      }
+
+      if (generationRound >= 5) break;
+
+      requestedCount = Math.min(3 - validatedRecipes.length, batchSizeLimit);
+      const maxResponseChars = requestedCount * MAX_RECIPE_JSON_LENGTH;
+      const followUpPrompt = [
+        `Genera exactamente ${requestedCount} recetas nuevas, distintas entre sí y en español.`,
+        `Ingredientes disponibles: ${recipeRequest.ingredients.join(", ")}.`,
+        `Restricciones: alergias ${recipeRequest.allergies.join(", ") || "ninguna"}; intolerancias ${recipeRequest.intolerances.join(", ") || "ninguna"}.`,
+        `Restricciones adicionales: ${recipeRequest.customRestrictions.map((item) => item.name).join(", ") || "ninguna"}.`,
+        `No uses ingredientes que no le gustan al usuario: ${recipeRequest.dislikedIngredients.join(", ") || "ninguno"}.`,
+        `No repitas ni hagas variantes de estas recetas: ${excludedTitles.join("; ") || "ninguna"}.`,
+        "Usa principalmente los ingredientes disponibles, varía técnica y tipo de plato, y no menciones las restricciones.",
+        "calories, protein, carbs y fats deben ser números enteros JSON, sin unidades ni comillas.",
+        `Cada receta debe tener máximo 4 pasos breves y menos de ${MAX_RECIPE_JSON_LENGTH} caracteres. Respuesta total máxima: ${maxResponseChars} caracteres.`,
+        `Devuelve solo JSON con la propiedad recipes y exactamente ${requestedCount} objetos, cada uno con title, prepTime, calories, macros (protein, carbs, fats), usedIngredients y steps.`,
+      ].join(" ");
+      const followUp = await requestRecipeResponse(
+        apiKey,
+        baseUrl,
+        modelsToTry,
+        followUpPrompt,
+        Math.min(3072, requestedCount * 1024),
+      );
+      if (!followUp.messageContent) {
+        console.error("Gemini could not generate the remaining recipes.", {
+          requestedCount,
+          lastGeminiError: followUp.lastGeminiError,
+        });
+        responseToParse = null;
+        break;
+      }
+      responseToParse = followUp.messageContent;
+    }
+
+    if (validatedRecipes.length !== 3) {
+      console.error("Could not assemble three valid, distinct recipes.", {
+        generatedCount: validatedRecipes.length,
+        generationRounds: generationRound,
+        excludedTitles,
       });
       return NextResponse.json(
-        { error: "La IA devolvió datos con formato incorrecto." },
+        { error: "No se pudieron generar tres recetas diferentes y válidas. Inténtalo de nuevo." },
         { status: 502 },
       );
     }
 
-    if (!isGeneratedRecipe(generated)) {
-      console.error("AI recipe did not match the expected schema.", {
-        generated,
-      });
-      return NextResponse.json(
-        { error: "La IA devolvió una receta incompleta. Inténtalo otra vez." },
-        { status: 502 },
-      );
-    }
+    const recipes = await Promise.all(
+      validatedRecipes.map(async ({
+        generatedRecipe,
+        matchedIngredients,
+      }): Promise<RecipeData> => {
+        const imageDetails = await findRecipeImage(
+          generatedRecipe.title,
+          generatedRecipe.usedIngredients,
+        );
+        let persistentImageUrl = imageDetails.imageUrl;
+        if (persistentImageUrl) {
+          try {
+            persistentImageUrl = await persistRecipeImage(persistentImageUrl);
+          } catch (imageError) {
+            console.error(
+              "Recipe image could not be persisted to Supabase Storage:",
+              imageError instanceof Error ? imageError.message : "unknown",
+            );
+            persistentImageUrl = undefined;
+          }
+        }
+        const imageAttribution = persistentImageUrl
+          ? {
+              imagePhotographer: imageDetails.imagePhotographer,
+              imageSourceUrl: imageDetails.imageSourceUrl,
+            }
+          : {};
 
-    const resultConflicts = findDietaryConflicts(
-      [
-        generated.title,
-        ...generated.usedIngredients,
-        ...generated.steps,
-      ].join(" "),
-      allergies,
-      intolerances,
+        return {
+          ...generatedRecipe,
+          usedIngredients: dedupeRecipeStrings(generatedRecipe.usedIngredients).slice(0, 20),
+          steps: dedupeRecipeStrings(generatedRecipe.steps).slice(0, 12),
+          matchPercentage: Math.min(
+            99,
+            Math.round((matchedIngredients.length / uniqueIngredients.length) * 100),
+          ),
+          ...imageAttribution,
+          ...(persistentImageUrl ? { imageUrl: persistentImageUrl } : {}),
+        };
+      }),
     );
-    if (resultConflicts.length) {
-      return NextResponse.json(
-        {
-          error: `La receta generada podría contener términos relacionados con tus restricciones (${dietaryLabels(resultConflicts).join(", ")}). No la uses sin revisar cuidadosamente los ingredientes.`,
-        },
-        { status: 422 },
-      );
-    }
-
-    const matchedIngredients = uniqueIngredients.filter((selected) => {
-      return generated.usedIngredients.some((used) =>
-        ingredientWordsMatch(selected, used),
-      );
-    });
-
-    if (matchedIngredients.length === 0) {
-      return NextResponse.json(
-        { error: "La receta no utilizó ingredientes de tu selección. Inténtalo otra vez." },
-        { status: 502 },
-      );
-    }
-
-    const recipe: RecipeData = {
-      ...generated,
-      usedIngredients: dedupeRecipeStrings(generated.usedIngredients).slice(0, 20),
-      steps: dedupeRecipeStrings(generated.steps).slice(0, 12),
-      matchPercentage: Math.min(
-        99,
-        Math.round((matchedIngredients.length / uniqueIngredients.length) * 100),
-      ),
-      ...(await findRecipeImage(generated.title, generated.usedIngredients)),
-    };
 
     try {
       const { supabase, user, error } = await getAuthenticatedProfile();
       if (!error && user) {
-        const { error: saveError } = await supabase
-          .from("recipes")
-          .upsert(
-            {
-              title: recipe.title.trim(),
-              description: recipe.title.trim(),
-              prep_time: recipe.prepTime,
-              calories: recipe.calories,
-              macros: {
-                protein: recipe.macros.protein,
-                carbs: recipe.macros.carbs,
-                fats: recipe.macros.fats,
-              },
-              used_ingredients: recipe.usedIngredients,
-              steps: recipe.steps,
-              image_url: recipe.imageUrl ?? null,
-              image_photographer: recipe.imagePhotographer ?? null,
-              image_source_url: recipe.imageSourceUrl ?? null,
-              match_percentage: recipe.matchPercentage,
-              created_by: user.id,
-            },
-            { onConflict: "title" },
-          );
+        await Promise.all(
+          recipes.map(async (recipe) => {
+            const { error: saveError } = await supabase
+              .from("recipes")
+              .upsert(
+                {
+                  title: recipe.title.trim(),
+                  description: recipe.title.trim(),
+                  prep_time: recipe.prepTime,
+                  calories: recipe.calories,
+                  macros: {
+                    protein: recipe.macros.protein,
+                    carbs: recipe.macros.carbs,
+                    fats: recipe.macros.fats,
+                  },
+                  used_ingredients: recipe.usedIngredients,
+                  steps: recipe.steps,
+                  image_url: recipe.imageUrl ?? null,
+                  image_photographer: recipe.imagePhotographer ?? null,
+                  image_source_url: recipe.imageSourceUrl ?? null,
+                  match_percentage: recipe.matchPercentage,
+                  created_by: user.id,
+                },
+                { onConflict: "title" },
+              );
 
-        if (saveError) {
-          console.warn("Generated recipe persistence failed:", saveError.code, saveError.message);
-        }
+            if (saveError) {
+              console.warn(
+                "Generated recipe persistence failed:",
+                saveError.code,
+                saveError.message,
+              );
+            }
+          }),
+        );
       }
     } catch (saveError) {
       console.warn("Generated recipe persistence error:", saveError);
     }
 
-    return NextResponse.json(recipe);
+    return NextResponse.json({ recipes });
   } catch (error) {
     console.error(
       "Gemini recipe generation failed:",

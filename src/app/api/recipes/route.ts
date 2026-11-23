@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
-import { findDietaryConflicts } from "@/lib/dietary";
+import {
+  allergyOptions,
+  findDietaryConflicts,
+  findNamedDietaryConflicts,
+  intoleranceOptions,
+} from "@/lib/dietary";
 import { dedupeRecipeStrings, isRecipeData, type RecipeData } from "@/lib/recipe";
 import { getAuthenticatedProfile } from "@/lib/supabase/profile";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { stabilizeRecipeImage } from "@/lib/supabase/recipe-images";
 
 function recipeToApiShape(row: Record<string, unknown>): RecipeData {
   const macros = (
@@ -69,7 +76,7 @@ export async function GET(request: Request) {
 
   const { data, error: queryError } = await supabase
     .from("recipes")
-    .select("*")
+    .select("id, title, prep_time, calories, macros, used_ingredients, steps, image_url, image_photographer, image_source_url, match_percentage, created_by, created_at")
     .order("created_at", { ascending: false });
 
   if (queryError) {
@@ -82,13 +89,91 @@ export async function GET(request: Request) {
 
   const allergies = profile?.allergies ?? [];
   const intolerances = profile?.intolerances ?? [];
+  let customRestrictions: Array<{ name: string; matchTerms: string[] }> = [];
+  let dislikedIngredients: string[] = [];
 
-  const recipes = (data ?? [])
-    .map((row) => recipeToApiShape(row as Record<string, unknown>))
-    .filter(isRecipeData)
+  if (user) {
+    const { data: preferences, error: preferencesError } = await supabase
+      .from("user_dietary_preferences")
+      .select("option_id")
+      .eq("user_id", user.id);
+    if (preferencesError) {
+      console.error("Explore dietary preference lookup failed:", preferencesError.code);
+      return NextResponse.json(
+        { error: "No se pudieron cargar tus restricciones alimentarias." },
+        { status: 503 },
+      );
+    }
+
+    const optionIds = (preferences ?? []).map((preference) => preference.option_id);
+    if (optionIds.length > 0) {
+      const legacyOptionIds = new Set([
+        ...allergyOptions.map((option) => `allergy:${option.id}`),
+        ...intoleranceOptions.map((option) => `intolerance:${option.id}`),
+      ]);
+      const { data: options, error: optionsError } = await supabase
+        .from("dietary_options")
+        .select("id, name, type, match_terms")
+        .in("id", optionIds);
+      if (optionsError) {
+        console.error("Explore dietary options lookup failed:", optionsError.code);
+        return NextResponse.json(
+          { error: "No se pudieron cargar tus restricciones alimentarias." },
+          { status: 503 },
+        );
+      }
+
+      customRestrictions = (options ?? [])
+        .filter((option) => option.type !== "dislike" && !legacyOptionIds.has(option.id))
+        .map((option) => ({ name: option.name, matchTerms: option.match_terms ?? [] }));
+      dislikedIngredients = (options ?? [])
+        .filter((option) => option.type === "dislike")
+        .flatMap((option) => [option.name, ...(option.match_terms ?? [])]);
+    }
+  }
+
+  const recipes = (await Promise.all(
+    (data ?? []).map(async (row) => {
+      const recipe = recipeToApiShape(row as Record<string, unknown>);
+      if (!isRecipeData(recipe)) return null;
+
+      const originalImageUrl = recipe.imageUrl;
+      recipe.imageUrl = await stabilizeRecipeImage(originalImageUrl);
+      if (
+        row.id &&
+        originalImageUrl &&
+        originalImageUrl !== recipe.imageUrl
+      ) {
+        const { error: imageUpdateError } = await createSupabaseAdminClient()
+          .from("recipes")
+          .update({
+            image_url: recipe.imageUrl ?? null,
+            ...(recipe.imageUrl
+              ? {}
+              : { image_photographer: null, image_source_url: null }),
+          })
+          .eq("id", row.id);
+        if (imageUpdateError) {
+          console.warn("Persisted recipe image URL update failed:", imageUpdateError.code);
+        }
+      }
+
+      return recipe;
+    }),
+  ))
+    .filter((recipe): recipe is RecipeData => recipe !== null)
     .filter((recipe) => {
       const recipeText = [recipe.title, ...recipe.usedIngredients, ...recipe.steps].join(" ");
-      return findDietaryConflicts(recipeText, allergies, intolerances).length === 0;
+      const customConflicts = findNamedDietaryConflicts(recipeText, customRestrictions);
+      const dislikeConflicts = findNamedDietaryConflicts(
+        [recipe.title, ...recipe.usedIngredients].join(" "),
+        dislikedIngredients.map((name) => ({ name, matchTerms: [] })),
+      );
+      return (
+        findDietaryConflicts(recipeText, allergies, intolerances).length === 0 &&
+        customConflicts.length === 0 &&
+        dislikeConflicts.length === 0
+      );
     })
     .filter((recipe) => {
       if (selectedIngredients.length === 0) return true;
@@ -146,6 +231,7 @@ export async function POST(request: Request) {
   const sanitizedUsedIngredients = dedupeRecipeStrings(record.usedIngredients).slice(0, 20);
   const sanitizedSteps = dedupeRecipeStrings(record.steps).slice(0, 12);
 
+  const imageUrl = await stabilizeRecipeImage(record.imageUrl);
   const recipeRecord = {
     title: record.title.trim(),
     description: record.title.trim(),
@@ -158,7 +244,7 @@ export async function POST(request: Request) {
     },
     used_ingredients: sanitizedUsedIngredients,
     steps: sanitizedSteps,
-    image_url: record.imageUrl ?? null,
+    image_url: imageUrl ?? null,
     image_photographer: record.imagePhotographer ?? null,
     image_source_url: record.imageSourceUrl ?? null,
     match_percentage: record.matchPercentage,

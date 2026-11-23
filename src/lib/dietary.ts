@@ -174,6 +174,27 @@ export function findDietaryConflicts(
   );
 }
 
+export function findNamedDietaryConflicts(
+  text: string,
+  restrictions: readonly { name: string; matchTerms: readonly string[] }[],
+) {
+  const normalizedText = normalizeDietaryText(text);
+  return restrictions.filter((restriction) =>
+    [restriction.name, ...restriction.matchTerms].some((term) => {
+      const normalizedTerm = normalizeDietaryText(term.trim())
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/\s+/g, "\\s+");
+      return (
+        normalizedTerm.length > 0 &&
+        new RegExp(
+          `(?:^|[^\\p{L}\\p{N}])${normalizedTerm}(?:$|[^\\p{L}\\p{N}])`,
+          "u",
+        ).test(normalizedText)
+      );
+    }),
+  );
+}
+
 export function dietaryLabels(ids: readonly string[]) {
   return ids.map((id) => optionLabels.get(id) ?? id);
 }

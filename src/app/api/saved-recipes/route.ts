@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { isRecipeData } from "@/lib/recipe";
+import { isRecipeData, type RecipeData } from "@/lib/recipe";
 import { getAuthenticatedProfile } from "@/lib/supabase/profile";
+import { stabilizeRecipeImage } from "@/lib/supabase/recipe-images";
 
 export async function GET() {
   try {
@@ -23,7 +24,7 @@ export async function GET() {
 
     const { data, error: queryError } = await supabase
       .from("saved_recipes")
-      .select("recipe")
+      .select("title, recipe")
       .eq("user_id", user.id)
       .order("updated_at", { ascending: false });
 
@@ -35,8 +36,32 @@ export async function GET() {
       );
     }
 
+    const recipes = await Promise.all(
+      data.map(async (row) => {
+        if (!isRecipeData(row.recipe)) return null;
+        const recipe = row.recipe as RecipeData;
+        const originalImageUrl = recipe.imageUrl;
+        recipe.imageUrl = await stabilizeRecipeImage(originalImageUrl);
+        if (originalImageUrl !== recipe.imageUrl) {
+          if (!recipe.imageUrl) {
+            delete recipe.imagePhotographer;
+            delete recipe.imageSourceUrl;
+          }
+          const { error: updateError } = await supabase
+            .from("saved_recipes")
+            .update({ recipe })
+            .eq("user_id", user.id)
+            .eq("title", row.title);
+          if (updateError) {
+            console.warn("Saved recipe image URL update failed:", updateError.code);
+          }
+        }
+        return recipe;
+      }),
+    );
+
     return NextResponse.json({
-      recipes: data.map((row) => row.recipe).filter(isRecipeData),
+      recipes: recipes.filter((recipe): recipe is RecipeData => recipe !== null),
     });
   } catch (error) {
     console.error(
@@ -92,11 +117,15 @@ export async function POST(request: Request) {
       );
     }
 
+    const savedRecipe = {
+      ...body.recipe,
+      imageUrl: await stabilizeRecipeImage(body.recipe.imageUrl),
+    };
     const { error: saveError } = await supabase.from("saved_recipes").upsert(
       {
         user_id: user.id,
-        title: body.recipe.title,
-        recipe: body.recipe,
+        title: savedRecipe.title,
+        recipe: savedRecipe,
       },
       { onConflict: "user_id,title" },
     );

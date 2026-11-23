@@ -9,7 +9,7 @@ export function createSupabaseAdminClient() {
 
   if (!serviceRoleKey) {
     throw new Error(
-      "Configura SUPABASE_SERVICE_ROLE_KEY solo en el servidor para buscar nombres de usuario.",
+      "Configura SUPABASE_SERVICE_ROLE_KEY solo en el servidor para operaciones administrativas.",
     );
   }
 

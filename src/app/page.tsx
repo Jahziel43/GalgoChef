@@ -26,6 +26,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   allergyOptions,
   findDietaryConflicts,
+  findNamedDietaryConflicts,
   intoleranceOptions,
   type AllergyId,
   type IntoleranceId,
@@ -52,6 +53,16 @@ type ProfileData = {
   allergies: AllergyId[];
   intolerances: IntoleranceId[];
 };
+type DietaryOption = {
+  id: string;
+  name: string;
+  type: "allergy" | "intolerance" | "dislike";
+  match_terms: string[];
+};
+const legacyDietaryOptionIds = new Set([
+  ...allergyOptions.map((option) => `allergy:${option.id}`),
+  ...intoleranceOptions.map((option) => `intolerance:${option.id}`),
+]);
 type PantryCategory = string;
 type PantryIngredient = {
   name: string;
@@ -162,12 +173,17 @@ export default function Home() {
   const [pantryIngredients, setPantryIngredients] = useState<PantryIngredient[]>(fallbackPantryIngredients);
   const [view, setView] = useState<"pantry" | "loading" | "recipe">("pantry");
   const [recipe, setRecipe] = useState<RecipeData | null>(null);
+  const [generatedRecipes, setGeneratedRecipes] = useState<RecipeData[]>([]);
+  const [generatedRecipeIndex, setGeneratedRecipeIndex] = useState(0);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
   const [savedRecipes, setSavedRecipes] = useState<string[]>([]);
   const [savedRecipeData, setSavedRecipeData] = useState<RecipeData[]>([]);
   const [profile, setProfile] = useState<ProfileData | null>(null);
   const [allergies, setAllergies] = useState<AllergyId[]>([]);
   const [intolerances, setIntolerances] = useState<IntoleranceId[]>([]);
+  const [dietaryOptions, setDietaryOptions] = useState<DietaryOption[]>([]);
+  const [selectedDietaryOptionIds, setSelectedDietaryOptionIds] = useState<string[]>([]);
+  const [guestDislikedIngredients, setGuestDislikedIngredients] = useState<string[]>([]);
   const [exploreRecipes, setExploreRecipes] = useState<RecipeData[]>([]);
   const [collections, setCollections] = useState<CollectionData[]>([]);
   const [showCollectionForm, setShowCollectionForm] = useState(false);
@@ -184,11 +200,12 @@ export default function Home() {
   useEffect(() => {
     void loadSession();
     void loadPantryIngredients();
+    void loadDietaryOptions();
   }, []);
 
   useEffect(() => {
     void loadExploreRecipes();
-  }, [selectedIngredients]);
+  }, [selectedIngredients, selectedDietaryOptionIds, allergies, intolerances]);
 
   useEffect(() => {
     if (profile) {
@@ -197,6 +214,35 @@ export default function Home() {
       setCollections([]);
     }
   }, [profile]);
+
+  useEffect(() => {
+    const refreshCatalogs = window.setInterval(() => {
+      void loadPantryIngredients();
+      void loadDietaryOptions();
+    }, 30_000);
+    return () => window.clearInterval(refreshCatalogs);
+  }, []);
+
+  useEffect(() => {
+    const dislikedKeys = new Set([
+      ...dietaryOptions
+        .filter(
+          (option) =>
+            option.type === "dislike" &&
+            selectedDietaryOptionIds.includes(option.id),
+        )
+        .map((option) => ingredientSelectionKey(option.name)),
+      ...guestDislikedIngredients.map(ingredientSelectionKey),
+    ]);
+    if (dislikedKeys.size === 0) return;
+
+    setSelectedIngredients((current) => {
+      const next = current.filter(
+        (ingredient) => !dislikedKeys.has(ingredientSelectionKey(ingredient)),
+      );
+      return next.length === current.length ? current : next;
+    });
+  }, [dietaryOptions, selectedDietaryOptionIds, guestDislikedIngredients]);
 
   async function loadPantryIngredients() {
     try {
@@ -222,11 +268,26 @@ export default function Home() {
           .map((ingredient) => ({
             name: ingredient.name,
             category: ingredient.category,
-            emoji: (ingredient as { emoji?: string }).emoji,
+            emoji:
+              typeof (ingredient as { emoji?: unknown }).emoji === "string"
+                ? (ingredient as { emoji: string }).emoji
+                : undefined,
           }));
 
         if (nextIngredients.length > 0) {
           setPantryIngredients(nextIngredients);
+          setSelectedIngredients((current) =>
+            dedupeIngredientSelection(
+              current.map(
+                (selected) =>
+                  nextIngredients.find(
+                    (ingredient) =>
+                      ingredientSelectionKey(ingredient.name) ===
+                      ingredientSelectionKey(selected),
+                  )?.name ?? selected,
+              ),
+            ),
+          );
           return;
         }
       }
@@ -237,6 +298,187 @@ export default function Home() {
       console.warn(
         cause instanceof Error ? cause.message : "No se pudo cargar la despensa.",
       );
+    }
+  }
+
+  async function loadDietaryOptions() {
+    try {
+      const response = await fetch("/api/dietary-options");
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudieron cargar las preferencias."));
+      }
+      if (typeof data !== "object" || data === null) return;
+      if ("options" in data && Array.isArray(data.options)) {
+        const options = data.options.filter(
+          (option): option is DietaryOption =>
+            typeof option === "object" &&
+            option !== null &&
+            typeof (option as { id?: unknown }).id === "string" &&
+            typeof (option as { name?: unknown }).name === "string" &&
+            ["allergy", "intolerance", "dislike"].includes(
+              String((option as { type?: unknown }).type),
+            ),
+        );
+        setDietaryOptions(options);
+      }
+      if (
+        "authenticated" in data &&
+        data.authenticated === true &&
+        "selectedIds" in data &&
+        Array.isArray(data.selectedIds) &&
+        data.selectedIds.every((id) => typeof id === "string")
+      ) {
+        setSelectedDietaryOptionIds(data.selectedIds);
+      }
+    } catch (cause) {
+      console.warn(
+        cause instanceof Error ? cause.message : "No se pudieron cargar preferencias.",
+      );
+    }
+  }
+
+  async function toggleDietaryOption(optionId: string, enabled: boolean) {
+    const previous = selectedDietaryOptionIds;
+    setSelectedDietaryOptionIds((current) =>
+      enabled
+        ? Array.from(new Set([...current, optionId]))
+        : current.filter((id) => id !== optionId),
+    );
+    if (!profile) return;
+
+    try {
+      const response = await fetch("/api/dietary-options", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ optionId, enabled }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo actualizar la restricción."));
+      }
+      await loadExploreRecipes();
+    } catch (cause) {
+      setSelectedDietaryOptionIds(previous);
+      setError(
+        cause instanceof Error ? cause.message : "No se pudo actualizar la restricción.",
+      );
+    }
+  }
+
+  async function toggleDislikedIngredient(name: string) {
+    const existingOption = dietaryOptions.find(
+      (option) =>
+        option.type === "dislike" &&
+        normalizeRecipeIngredientKey(option.name) === normalizeRecipeIngredientKey(name),
+    );
+    const enabled = existingOption
+      ? !selectedDietaryOptionIds.includes(existingOption.id)
+      : true;
+
+    if (!profile) {
+      setGuestDislikedIngredients((current) =>
+        enabled
+          ? Array.from(new Set([...current, name]))
+          : current.filter(
+              (item) => normalizeRecipeIngredientKey(item) !== normalizeRecipeIngredientKey(name),
+            ),
+      );
+      if (enabled) {
+        setSelectedIngredients((current) =>
+          current.filter(
+            (item) => ingredientSelectionKey(item) !== ingredientSelectionKey(name),
+          ),
+        );
+      }
+      setNotice(
+        enabled
+          ? `${name} no se usará en las recetas de esta visita.`
+          : `${name} ya puede aparecer en las recetas de esta visita.`,
+      );
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/dietary-options", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dislikeIngredient: name, enabled }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo guardar el ingrediente que no te gusta."));
+      }
+      if (enabled) {
+        setSelectedIngredients((current) =>
+          current.filter(
+            (item) => ingredientSelectionKey(item) !== ingredientSelectionKey(name),
+          ),
+        );
+      }
+      await loadDietaryOptions();
+      setNotice(
+        enabled
+          ? `${name} se excluirá de tus recetas.`
+          : `${name} ya puede aparecer en tus recetas.`,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "No se pudo guardar el ingrediente que no te gusta.",
+      );
+    }
+  }
+
+  const selectedCustomRestrictions = dietaryOptions
+    .filter(
+      (option) =>
+        option.type !== "dislike" &&
+        !legacyDietaryOptionIds.has(option.id) &&
+        selectedDietaryOptionIds.includes(option.id),
+    )
+    .map((option) => ({ name: option.name, matchTerms: option.match_terms ?? [] }));
+  const selectedDislikedIngredients = [
+    ...dietaryOptions
+      .filter(
+        (option) =>
+          option.type === "dislike" && selectedDietaryOptionIds.includes(option.id),
+      )
+      .flatMap((option) => [option.name, ...(option.match_terms ?? [])]),
+    ...guestDislikedIngredients,
+  ];
+  const displayedDislikedIngredients = Array.from(
+    new Map(
+      [
+        ...dietaryOptions
+          .filter(
+            (option) =>
+              option.type === "dislike" &&
+              selectedDietaryOptionIds.includes(option.id),
+          )
+          .map((option) => option.name),
+        ...guestDislikedIngredients,
+      ].map((name) => [normalizeRecipeIngredientKey(name), name]),
+    ).values(),
+  );
+
+  async function suggestDietaryOption(name: string) {
+    const response = await fetch("/api/dietary-options", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(getResponseError(data, "No se pudo enviar la sugerencia."));
+    }
+    if (typeof data === "object" && data !== null && "exists" in data && data.exists) {
+      setNotice("Esa opción ya está disponible en la lista.");
+    } else if (typeof data === "object" && data !== null && "processing" in data && data.processing) {
+      setNotice("Se está revisando el grupo de opciones en segundo plano.");
+    } else {
+      setNotice("Sugerencia enviada. Se revisará al completar el grupo de 10.");
     }
   }
 
@@ -481,11 +723,32 @@ export default function Home() {
 
   function toggleIngredient(ingredient: string) {
     setSelectedIngredients((current) => {
-      const next = current.includes(ingredient)
-        ? current.filter((item) => item !== ingredient)
+      const isSelected = current.some(
+        (item) => ingredientSelectionKey(item) === ingredientSelectionKey(ingredient),
+      );
+      if (!isSelected && isIngredientDisliked(ingredient)) return current;
+      const next = isSelected
+        ? current.filter(
+            (item) => ingredientSelectionKey(item) !== ingredientSelectionKey(ingredient),
+          )
         : [...current, ingredient];
       return dedupeIngredientSelection(next);
     });
+  }
+
+  function isIngredientDisliked(name: string) {
+    const key = ingredientSelectionKey(name);
+    return (
+      dietaryOptions.some(
+        (option) =>
+          option.type === "dislike" &&
+          selectedDietaryOptionIds.includes(option.id) &&
+          ingredientSelectionKey(option.name) === key,
+      ) ||
+      guestDislikedIngredients.some(
+        (ingredient) => ingredientSelectionKey(ingredient) === key,
+      )
+    );
   }
 
   async function addCustomIngredient(event: React.FormEvent<HTMLFormElement>) {
@@ -562,6 +825,8 @@ export default function Home() {
           ingredients,
           allergies,
           intolerances,
+          customRestrictions: selectedCustomRestrictions,
+          dislikedIngredients: selectedDislikedIngredients,
         }),
       });
       const data: unknown = await response.json();
@@ -572,27 +837,41 @@ export default function Home() {
         );
       }
 
-      if (!isRecipeData(data)) {
-        throw new Error("Recibimos una receta en un formato inesperado.");
+      if (
+        typeof data !== "object" ||
+        data === null ||
+        !("recipes" in data) ||
+        !Array.isArray(data.recipes) ||
+        data.recipes.length !== 3 ||
+        !data.recipes.every(isRecipeData)
+      ) {
+        throw new Error("Recibimos recetas en un formato inesperado.");
       }
 
-      const normalizedRecipe: RecipeData = {
-        ...data,
-        usedIngredients: dedupeRecipeStrings(data.usedIngredients),
-        steps: dedupeRecipeStrings(data.steps),
-      };
+      const normalizedRecipes = data.recipes.map((item) => ({
+        ...item,
+        usedIngredients: dedupeRecipeStrings(item.usedIngredients),
+        steps: dedupeRecipeStrings(item.steps),
+      }));
 
       try {
         if (profile) {
-          const saveResponse = await fetch("/api/recipes", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ recipe: normalizedRecipe }),
-          });
-          const saveData: unknown = await saveResponse.json();
-          if (!saveResponse.ok) {
-            console.warn("Generated recipe persistence failed:", getResponseError(saveData, "No se pudo guardar la receta."));
-          }
+          await Promise.all(
+            normalizedRecipes.map(async (generatedRecipe) => {
+              const saveResponse = await fetch("/api/recipes", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ recipe: generatedRecipe }),
+              });
+              const saveData: unknown = await saveResponse.json();
+              if (!saveResponse.ok) {
+                console.warn(
+                  "Generated recipe persistence failed:",
+                  getResponseError(saveData, "No se pudo guardar la receta."),
+                );
+              }
+            }),
+          );
         }
       } catch (saveError) {
         console.warn("Generated recipe persistence error:", saveError);
@@ -600,18 +879,22 @@ export default function Home() {
 
       await new Promise((resolve) => window.setTimeout(resolve, 2500));
       if (generationId.current !== requestId) return;
-      setRecipe(normalizedRecipe);
+      setGeneratedRecipes(normalizedRecipes);
+      setGeneratedRecipeIndex(0);
+      setRecipe(normalizedRecipes[0]);
       setCompletedSteps([]);
       setSavedRecipes((current) =>
-        current.includes(normalizedRecipe.title)
-          ? current
-          : current.concat(normalizedRecipe.title),
+        Array.from(
+          new Set([...normalizedRecipes.map((item) => item.title), ...current]),
+        ),
       );
-      setSavedRecipeData((current) =>
-        current.some((item) => item.title === normalizedRecipe.title)
-          ? current
-          : [normalizedRecipe, ...current],
-      );
+      setSavedRecipeData((current) => {
+        const byTitle = new Map(current.map((item) => [item.title, item]));
+        for (const generatedRecipe of normalizedRecipes) {
+          byTitle.set(generatedRecipe.title, generatedRecipe);
+        }
+        return Array.from(byTitle.values());
+      });
       await loadExploreRecipes();
       setShowMoreRecipes(true);
       setView("recipe");
@@ -633,9 +916,19 @@ export default function Home() {
 
   function showRecipe(recipeToShow: RecipeData) {
     setShareMessage("");
+    setGeneratedRecipes([recipeToShow]);
+    setGeneratedRecipeIndex(0);
     setRecipe(recipeToShow);
     setCompletedSteps([]);
     setView("recipe");
+  }
+
+  function showGeneratedRecipe(index: number) {
+    const selectedRecipe = generatedRecipes[index];
+    if (!selectedRecipe) return;
+    setGeneratedRecipeIndex(index);
+    setRecipe(selectedRecipe);
+    setCompletedSteps([]);
   }
 
   async function toggleSaved(recipeToToggle: RecipeData) {
@@ -709,6 +1002,7 @@ export default function Home() {
       throw new Error(getResponseError(data, "No se pudo completar el acceso."));
     }
     await loadSession();
+    await loadDietaryOptions();
   }
 
   async function logout() {
@@ -723,8 +1017,38 @@ export default function Home() {
       setSavedRecipeData([]);
       setAllergies([]);
       setIntolerances([]);
+      setSelectedDietaryOptionIds([]);
+      setGuestDislikedIngredients([]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "No se pudo cerrar sesión.");
+    }
+  }
+
+  async function deleteAccount() {
+    const confirmed = window.confirm(
+      "¿Eliminar tu cuenta permanentemente? Se borrarán tus recetas, colecciones y preferencias. Esta acción no se puede deshacer.",
+    );
+    if (!confirmed) return;
+
+    try {
+      const response = await fetch("/api/auth/account", { method: "DELETE" });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(getResponseError(data, "No se pudo eliminar la cuenta."));
+      }
+
+      setProfile(null);
+      setSavedRecipes([]);
+      setSavedRecipeData([]);
+      setCollections([]);
+      setAllergies([]);
+      setIntolerances([]);
+      setSelectedDietaryOptionIds([]);
+      setGuestDislikedIngredients([]);
+      setSelectedCollectionId(null);
+      setNotice("Tu cuenta y sus datos asociados fueron eliminados.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "No se pudo eliminar la cuenta.");
     }
   }
 
@@ -756,6 +1080,7 @@ export default function Home() {
       ) {
         setProfile(data.user as ProfileData);
       }
+      await loadExploreRecipes();
       setNotice("Preferencias alimentarias guardadas.");
     } catch (cause) {
       setError(
@@ -809,7 +1134,23 @@ export default function Home() {
     (item, index, items) =>
       items.findIndex((candidate) => candidate.title === item.title) === index,
   );
-  const exploreCandidates = exploreRecipes.length > 0 ? exploreRecipes : sampleRecipes;
+  const exploreCandidates = (exploreRecipes.length > 0 ? exploreRecipes : sampleRecipes).filter(
+    (candidate) => {
+      const recipeText = [
+        candidate.title,
+        ...candidate.usedIngredients,
+        ...candidate.steps,
+      ].join(" ");
+      return (
+        findDietaryConflicts(recipeText, allergies, intolerances).length === 0 &&
+        findNamedDietaryConflicts(recipeText, selectedCustomRestrictions).length === 0 &&
+        findNamedDietaryConflicts(
+          [candidate.title, ...candidate.usedIngredients].join(" "),
+          selectedDislikedIngredients.map((name) => ({ name, matchTerms: [] })),
+        ).length === 0
+      );
+    },
+  );
   const displayedRecipes =
     tab === "saved"
       ? allRecipes.filter((item) => savedRecipes.includes(item.title))
@@ -860,6 +1201,9 @@ export default function Home() {
             {view === "recipe" && recipe ? (
               <RecipeScreen
                 recipe={recipe}
+                alternatives={generatedRecipes}
+                selectedAlternative={generatedRecipeIndex}
+                onSelectAlternative={showGeneratedRecipe}
                 saved={recipeSaved}
                 completedSteps={completedSteps}
                 shareMessage={shareMessage}
@@ -867,6 +1211,8 @@ export default function Home() {
                 onComplete={() => {
                   setCompletedSteps([]);
                   setRecipe(null);
+                  setGeneratedRecipes([]);
+                  setGeneratedRecipeIndex(0);
                   setView("pantry");
                   setTab("pantry");
                 }}
@@ -977,31 +1323,92 @@ export default function Home() {
                       : "seleccionados"}
                   </span>
                 </div>
+                <p className="pantry-dislike-help">
+                  🤢 Pulsa el emoji junto a un ingrediente para indicar que no
+                  te gusta y excluirlo de tus recetas.
+                </p>
+                {displayedDislikedIngredients.length > 0 && (
+                  <div className="pantry-dislikes" aria-label="Ingredientes que no te gustan">
+                    <strong>No te gustan:</strong>
+                    <div className="pantry-dislike-list">
+                      {displayedDislikedIngredients.map((name) => (
+                        <button
+                          aria-label={`Quitar ${name} de los ingredientes que no te gustan`}
+                          key={normalizeRecipeIngredientKey(name)}
+                          onClick={() => void toggleDislikedIngredient(name)}
+                          title={`Quitar ${name} de los que no te gustan`}
+                          type="button"
+                        >
+                          <span>{name}</span>
+                          <span aria-hidden="true">😋</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="pantry-grid">
-                  {filteredIngredients.map(({ name, category }) => {
+                  {filteredIngredients.map(({ name, category, emoji }) => {
                     const selected = selectedIngredients.includes(name);
+                    const dislikeOption = dietaryOptions.find(
+                      (option) =>
+                        option.type === "dislike" &&
+                        normalizeRecipeIngredientKey(option.name) ===
+                          normalizeRecipeIngredientKey(name),
+                    );
+                    const disliked = dislikeOption
+                      ? selectedDietaryOptionIds.includes(dislikeOption.id)
+                      : guestDislikedIngredients.some(
+                          (item) =>
+                            normalizeRecipeIngredientKey(item) ===
+                            normalizeRecipeIngredientKey(name),
+                        );
                     return (
-                      <button
-                        aria-pressed={selected}
-                        className={
-                          selected
-                            ? "pantry-item selected"
-                            : "pantry-item"
-                        }
+                      <div
+                        className={[
+                          "pantry-item",
+                          selected && "selected",
+                          disliked && "disliked",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
                         key={name}
-                        onClick={() => toggleIngredient(name)}
-                        type="button"
                       >
-                        <span className="ingredient-icon" aria-hidden="true">
-                          {ingredientEmoji(name)}
-                        </span>
-                        <span>{name}</span>
-                        {selected ? (
-                          <Check className="item-trailing" size={15} />
-                        ) : (
-                          <span className="item-category">{category}</span>
-                        )}
-                      </button>
+                        <button
+                          aria-pressed={selected}
+                          disabled={disliked && !selected}
+                          className="pantry-item-select"
+                          onClick={() => toggleIngredient(name)}
+                          type="button"
+                        >
+                          {emoji && (
+                            <span className="ingredient-icon" aria-hidden="true">
+                              {emoji}
+                            </span>
+                          )}
+                          <span>{name}</span>
+                          {selected ? (
+                            <Check className="item-trailing" size={15} />
+                          ) : (
+                            <span className="item-category">{category}</span>
+                          )}
+                        </button>
+                        <button
+                          aria-label={
+                            disliked
+                              ? `Indicar que te gusta ${name} y quitarlo de los que no te gustan`
+                              : `Indicar que no te gusta ${name}`
+                          }
+                          aria-pressed={disliked}
+                          className={
+                            disliked ? "ingredient-dislike active" : "ingredient-dislike"
+                          }
+                          onClick={() => void toggleDislikedIngredient(name)}
+                          title={disliked ? "Me gusta; quitar de los que no te gustan" : "No me gusta"}
+                          type="button"
+                        >
+                          {disliked ? "😋" : "🤢"}
+                        </button>
+                      </div>
                     );
                   })}
                   {filteredIngredients.length === 0 && (
@@ -1017,17 +1424,20 @@ export default function Home() {
                         ),
                     )
                     .map((ingredient) => (
-                      <button
-                        aria-pressed="true"
+                      <div
                         className="pantry-item selected"
                         key={ingredient}
-                        onClick={() => toggleIngredient(ingredient)}
-                        type="button"
                       >
-                        <span className="ingredient-icon">✨</span>
-                        <span>{ingredient}</span>
-                        <X className="item-trailing" size={15} />
-                      </button>
+                        <button
+                          aria-pressed="true"
+                          className="pantry-item-select"
+                          onClick={() => toggleIngredient(ingredient)}
+                          type="button"
+                        >
+                          <span>{ingredient}</span>
+                          <X className="item-trailing" size={15} />
+                        </button>
+                      </div>
                     ))}
                 </div>
 
@@ -1067,10 +1477,22 @@ export default function Home() {
                         : `${exploreCandidates.length} sugerencias para tu despensa`}
                     </p>
                   </div>
-                  <span className="time-filter">
+                  <button
+                    aria-label={
+                      selectedIngredients.length > 0
+                        ? "Cambiar ingredientes seleccionados en la despensa"
+                        : "Elegir ingredientes en la despensa"
+                    }
+                    className="time-filter"
+                    onClick={() => goToTab("pantry")}
+                    title="Ir a la despensa"
+                    type="button"
+                  >
                     <SlidersHorizontal size={14} />
-                    {selectedIngredients.length > 0 ? "Compatibles" : "Explorar"}
-                  </span>
+                    {selectedIngredients.length > 0
+                      ? "Cambiar ingredientes"
+                      : "Elegir ingredientes"}
+                  </button>
                 </div>
                 <div className="explore-highlight">
                   <Sparkles size={14} />
@@ -1305,10 +1727,15 @@ export default function Home() {
                 profile={profile}
                 allergies={allergies}
                 intolerances={intolerances}
+                dietaryOptions={dietaryOptions}
+                selectedDietaryOptionIds={selectedDietaryOptionIds}
                 onAllergiesChange={setAllergies}
                 onIntolerancesChange={setIntolerances}
+                onToggleDietaryOption={toggleDietaryOption}
+                onSuggestDietaryOption={suggestDietaryOption}
                 onAuthenticate={authenticate}
                 onLogout={logout}
+                onDeleteAccount={deleteAccount}
                 onSavePreferences={saveDietaryPreferences}
               />
             )}
@@ -1459,17 +1886,26 @@ function AccountScreen({
   profile,
   allergies,
   intolerances,
+  dietaryOptions,
+  selectedDietaryOptionIds,
   onAllergiesChange,
   onIntolerancesChange,
+  onToggleDietaryOption,
+  onSuggestDietaryOption,
   onAuthenticate,
   onLogout,
+  onDeleteAccount,
   onSavePreferences,
 }: {
   profile: ProfileData | null;
   allergies: AllergyId[];
   intolerances: IntoleranceId[];
+  dietaryOptions: DietaryOption[];
+  selectedDietaryOptionIds: string[];
   onAllergiesChange: (values: AllergyId[]) => void;
   onIntolerancesChange: (values: IntoleranceId[]) => void;
+  onToggleDietaryOption: (optionId: string, enabled: boolean) => Promise<void>;
+  onSuggestDietaryOption: (name: string) => Promise<void>;
   onAuthenticate: (
     mode: "login" | "register",
     values: {
@@ -1480,6 +1916,7 @@ function AccountScreen({
     },
   ) => Promise<void>;
   onLogout: () => Promise<void>;
+  onDeleteAccount: () => Promise<void>;
   onSavePreferences: () => Promise<void>;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
@@ -1489,6 +1926,8 @@ function AccountScreen({
   const [password, setPassword] = useState("");
   const [formError, setFormError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [newDietarySuggestion, setNewDietarySuggestion] = useState("");
+  const [isSuggestingDietaryOption, setIsSuggestingDietaryOption] = useState(false);
 
   async function submitAuthentication(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1510,6 +1949,41 @@ function AccountScreen({
       setIsSubmitting(false);
     }
   }
+
+  async function submitDietarySuggestion(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = newDietarySuggestion.trim();
+    if (!name) return;
+    if (!profile) {
+      setFormError("Inicia sesión para proponer una alergia o intolerancia.");
+      return;
+    }
+
+    setFormError("");
+    setIsSuggestingDietaryOption(true);
+    try {
+      await onSuggestDietaryOption(name);
+      setNewDietarySuggestion("");
+    } catch (cause) {
+      setFormError(
+        cause instanceof Error ? cause.message : "No se pudo enviar la sugerencia.",
+      );
+    } finally {
+      setIsSuggestingDietaryOption(false);
+    }
+  }
+
+  const customAllergies = dietaryOptions.filter(
+    (option) => option.type === "allergy" && !legacyDietaryOptionIds.has(option.id),
+  );
+  const customIntolerances = dietaryOptions.filter(
+    (option) =>
+      option.type === "intolerance" && !legacyDietaryOptionIds.has(option.id),
+  );
+  const selectedDislikes = dietaryOptions.filter(
+    (option) =>
+      option.type === "dislike" && selectedDietaryOptionIds.includes(option.id),
+  );
 
   return (
     <section aria-labelledby="account-title" className="account-screen">
@@ -1539,6 +2013,13 @@ function AccountScreen({
               type="button"
             >
               Cerrar sesión
+            </button>
+            <button
+              className="account-delete"
+              onClick={() => void onDeleteAccount()}
+              type="button"
+            >
+              Eliminar cuenta
             </button>
           </div>
         </div>
@@ -1694,7 +2175,81 @@ function AccountScreen({
               <span>{option.label}</span>
             </label>
           ))}
+          {customIntolerances.map((option) => (
+            <label className="dietary-option" key={option.id}>
+              <input
+                checked={selectedDietaryOptionIds.includes(option.id)}
+                onChange={(event) =>
+                  void onToggleDietaryOption(option.id, event.target.checked)
+                }
+                type="checkbox"
+              />
+              <span>{option.name}</span>
+            </label>
+          ))}
         </div>
+        {customAllergies.length > 0 && (
+          <>
+            <h3>Otras alergias</h3>
+            <div className="dietary-options">
+              {customAllergies.map((option) => (
+                <label className="dietary-option" key={option.id}>
+                  <input
+                    checked={selectedDietaryOptionIds.includes(option.id)}
+                    onChange={(event) =>
+                      void onToggleDietaryOption(option.id, event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>{option.name}</span>
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+        {selectedDislikes.length > 0 && (
+          <>
+            <h3>Ingredientes que no te gustan</h3>
+            <div className="dietary-options">
+              {selectedDislikes.map((option) => (
+                <label className="dietary-option" key={option.id}>
+                  <input
+                    checked
+                    onChange={() => void onToggleDietaryOption(option.id, false)}
+                    type="checkbox"
+                  />
+                  <span>{option.name}</span>
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+        <form className="dietary-suggestion-form" onSubmit={submitDietarySuggestion}>
+          <label htmlFor="dietary-suggestion">
+            ¿Falta una alergia o intolerancia?
+          </label>
+          <div className="search-field">
+            <input
+              id="dietary-suggestion"
+              maxLength={100}
+              onChange={(event) => setNewDietarySuggestion(event.target.value)}
+              placeholder="Escribe una opción para proponerla"
+              value={newDietarySuggestion}
+            />
+            <button
+              className="small-button"
+              disabled={!profile || !newDietarySuggestion.trim() || isSuggestingDietaryOption}
+              type="submit"
+            >
+              {isSuggestingDietaryOption ? "Enviando..." : "Proponer"}
+            </button>
+          </div>
+          <small>
+            {profile
+              ? "Al juntar 10 propuestas, Gemini las clasificará y quitará duplicados. Las nuevas opciones se agregarán automáticamente a tus restricciones."
+              : "Inicia sesión para proponer opciones. Al juntar 10, Gemini las clasificará y quitará duplicados."}
+          </small>
+        </form>
         <div className="dietary-warning">
           Revisa siempre las etiquetas y el riesgo de contaminación cruzada.
           Estas sugerencias no garantizan seguridad médica.
@@ -1709,20 +2264,6 @@ function AccountScreen({
       </section>
     </section>
   );
-}
-
-function ingredientEmoji(ingredient: string) {
-  const emojis: Record<string, string> = {
-    Huevos: "🥚",
-    Espinaca: "🥬",
-    Tomate: "🍅",
-    Aguacate: "🥑",
-    Yogur: "🥛",
-    Pollo: "🍗",
-    Cebolla: "🧅",
-    "Aceite de oliva": "🫒",
-  };
-  return emojis[ingredient] ?? "🥕";
 }
 
 function LoadingScreen({ onCancel }: { onCancel: () => void }) {
@@ -1757,8 +2298,8 @@ function LoadingScreen({ onCancel }: { onCancel: () => void }) {
       </p>
       <div className="loading-step">••• &nbsp; Paso 2 de 3</div>
       <div className="loading-preparing">
-        <strong>Preparando tus mejores opciones</strong>
-        <span>2 recetas</span>
+        <strong>Preparando 3 opciones diferentes</strong>
+        <span>3 recetas</span>
       </div>
       <div className="skeleton-recipe" aria-hidden="true">
         <span className="skeleton-photo" />
@@ -1948,6 +2489,9 @@ function CollectionCard({
 
 function RecipeScreen({
   recipe,
+  alternatives,
+  selectedAlternative,
+  onSelectAlternative,
   saved,
   completedSteps,
   shareMessage,
@@ -1959,6 +2503,9 @@ function RecipeScreen({
   onToggleStep,
 }: {
   recipe: RecipeData;
+  alternatives: RecipeData[];
+  selectedAlternative: number;
+  onSelectAlternative: (index: number) => void;
   saved: boolean;
   completedSteps: number[];
   shareMessage: string;
@@ -2007,7 +2554,30 @@ function RecipeScreen({
           <Share2 size={17} />
         </button>
       </header>
+      {alternatives.length > 1 && (
+        <nav className="recipe-alternatives" aria-label="Otras recetas generadas">
+          <span>Elige una receta ({selectedAlternative + 1} de {alternatives.length})</span>
+          <div>
+            {alternatives.map((alternative, index) => (
+              <button
+                aria-pressed={selectedAlternative === index}
+                className={
+                  selectedAlternative === index
+                    ? "recipe-alternative active"
+                    : "recipe-alternative"
+                }
+                key={`${alternative.title}-${index}`}
+                onClick={() => onSelectAlternative(index)}
+                type="button"
+              >
+                {alternative.title}
+              </button>
+            ))}
+          </div>
+        </nav>
+      )}
       <RecipeDetailContent
+        key={recipe.title}
         recipe={recipe}
         completedSteps={completedSteps}
         onToggleStep={onToggleStep}
