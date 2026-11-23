@@ -1,18 +1,82 @@
 # GalgoChef
 
-Aplicación web adaptable para encontrar recetas con ingredientes disponibles, considerar alergias e intolerancias, guardar recetas en una cuenta y seguir la preparación paso a paso.
+GalgoChef te ayuda a preparar recetas con lo que tienes en casa. Puedes guardar tus ingredientes, indicar restricciones alimentarias y recibir tres ideas de recetas para elegir.
 
-## Ejecutar en local
+## Requisitos
 
-Requisitos: Node.js 20 o superior y npm.
+- Node.js 20 o superior y npm.
+- Un proyecto de [Supabase](https://supabase.com/).
+- Una clave de API de [Google AI Studio](https://aistudio.google.com/) para generar recetas.
+
+## 1. Configura Supabase
+
+1. Crea un proyecto en Supabase.
+2. Copia la URL y la clave publicable (o `anon`) del proyecto. Las pondrás en `SUPABASE_URL` y `SUPABASE_ANON_KEY`.
+3. En **Project Settings → API Keys**, copia la clave `service_role` para `SUPABASE_SERVICE_ROLE_KEY`. Es secreta: úsala solo en el servidor. No la pongas en una variable `NEXT_PUBLIC_*` ni la compartas.
+4. En una terminal, inicia sesión y enlaza el proyecto:
+
+   ```bash
+   npx supabase login
+   npx supabase link --project-ref TU_PROJECT_REF
+   ```
+
+5. Aplica las migraciones:
+
+   ```bash
+   npx supabase db push --remote
+   ```
+
+   Antes de confirmar, verifica que el proyecto de destino sea el correcto. Las migraciones preparan las tablas y el almacenamiento de imágenes.
+
+Para este proyecto escolar, si quieres que las cuentas puedan iniciar sesión sin verificar el correo, desactiva la confirmación de email en **Authentication → Providers → Email**. En una aplicación pública o real, mantenla activada.
+
+## 2. Configura y ejecuta la aplicación
+
+Desde la carpeta del proyecto:
 
 ```bash
 npm install
 cp .env.example .env.local
+```
+
+Abre `.env.local` y completa estas variables:
+
+| Variable | Dónde conseguirla |
+| --- | --- |
+| `SUPABASE_URL` | URL del proyecto Supabase |
+| `SUPABASE_ANON_KEY` | Clave publicable (o `anon`) de Supabase |
+| `SUPABASE_SERVICE_ROLE_KEY` | Clave `service_role` de Supabase; mantenla secreta |
+| `AI_MODEL_API_KEY` | Clave de Google AI Studio |
+
+Las demás opciones de Gemini ya tienen valores predeterminados en `.env.example`. Luego inicia la app:
+
+```bash
 npm run dev
 ```
 
-Completa `.env.local` con las variables de los servicios indicados abajo. Abre [http://localhost:3000](http://localhost:3000). Para validar el proyecto:
+Abre [http://localhost:3000](http://localhost:3000).
+
+## Funciones opcionales
+
+### Fotos de recetas
+
+Si quieres buscar fotos automáticamente, crea una clave en [Pixabay](https://pixabay.com/api/docs/) y añádela como `PIXABAY_API_KEY` en `.env.local`. Las imágenes se copian al almacenamiento de Supabase para no depender de enlaces temporales.
+
+Las recetas antiguas con enlaces de Pixabay que todavía funcionen se pueden migrar. Para ejecutar la migración en lote:
+
+```bash
+npm run migrate:recipe-images
+```
+
+Este comando carga las variables desde `.env` (no desde `.env.local`) y necesita la URL de Supabase y `SUPABASE_SERVICE_ROLE_KEY`. Si una imagen de origen ya no está disponible, no se puede recuperar desde ese enlace.
+
+### Restricciones alimentarias
+
+Puedes elegir alergias e intolerancias, proponer nuevas opciones y marcar ingredientes que no te gustan. Al llegar a diez propuestas nuevas, Gemini las revisa y la app añade las que correspondan. Sin iniciar sesión, las preferencias solo se conservan durante la visita actual.
+
+## Comprobaciones
+
+Para revisar el proyecto antes de compartir cambios:
 
 ```bash
 npm run lint
@@ -20,26 +84,8 @@ npx tsc --noEmit
 npm run build
 ```
 
-## Supabase: cuentas y guardados
+## Seguridad y alimentación
 
-1. Crea un proyecto en [Supabase](https://supabase.com/).
-2. Copia la URL y la clave publicable (o `anon`) del proyecto a `SUPABASE_URL` y `SUPABASE_ANON_KEY`.
-3. En **Project Settings → API Keys**, copia la clave `service_role` a `SUPABASE_SERVICE_ROLE_KEY`. Se usa solo en el servidor para operaciones administrativas, como eliminar una cuenta y guardar imágenes en Storage. Es un secreto: nunca la pongas en el navegador, en una variable `NEXT_PUBLIC_*` ni en el repositorio.
-4. Aplica las migraciones de `supabase/migrations` en orden. Con el CLI enlazado al proyecto remoto: `npx supabase db push --remote`. Esto prepara cuentas, recetas, ingredientes, preferencias alimentarias y el bucket público `recipe-images` de Storage.
-5. En **Authentication → Providers → Email**, desactiva la confirmación de email para que el registro permita iniciar sesión sin verificar el correo. Esto es adecuado solo para este proyecto escolar; para un producto real, activa la confirmación.
+No publiques `SUPABASE_SERVICE_ROLE_KEY` ni `AI_MODEL_API_KEY`, y nunca las configures con el prefijo `NEXT_PUBLIC_`.
 
-La aplicación permite registro con usuario, correo y contraseña; acceso con usuario o correo; alergias e intolerancias personalizadas; exclusión de ingredientes que no gustan; y recetas guardadas asociadas a la cuenta. Las sesiones se almacenan en cookies SSR y las tablas tienen Row Level Security. Sin sesión, las preferencias se aplican solo a la visita actual y los guardados no se sincronizan. Las propuestas de nuevas alergias o intolerancias se clasifican en grupos de diez con Gemini.
-
-## IA: generación de recetas
-
-La app usa exclusivamente Google Gemini. Configura `AI_PROVIDER=gemini`, `AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta` y `AI_MODEL=gemini-3.6-flash` (o uno de los modelos alternativos en `AI_MODELS`), junto con `AI_MODEL_API_KEY` del proyecto de Google AI Studio. Cada solicitud genera tres recetas distintas en una sola llamada y permite elegir entre ellas. La llamada se realiza exclusivamente desde el servidor; la clave no se envía al navegador. El endpoint valida las recetas estructuradas y vuelve a comprobar que no coincidan con las restricciones alimentarias configuradas.
-
-La nutrición generada es una estimación, no consejo médico. La detección de alérgenos es conservadora pero no puede garantizar que un alimento sea seguro: revisa etiquetas, ingredientes y riesgo de contaminación cruzada. Configura límites de uso y presupuesto en el proveedor antes de desplegar públicamente.
-
-## Fotos de recetas (opcional)
-
-Para buscar fotos automáticamente, crea una API key de [Pixabay](https://pixabay.com/api/docs/) y configura `PIXABAY_API_KEY`. El servidor copia las imágenes al bucket público `recipe-images` de Supabase Storage y conserva el crédito del fotógrafo y su fuente, evitando depender del enlace temporal de Pixabay. Las recetas antiguas con enlaces Pixabay aún activos se migran al bucket al consultarse. También puedes ejecutar `npm run migrate:recipe-images` para migrar en lote las imágenes disponibles de las tablas `recipes` y `saved_recipes`; el comando carga `.env`, requiere `SUPABASE_URL` (o `NEXT_PUBLIC_SUPABASE_URL`) y `SUPABASE_SERVICE_ROLE_KEY`, y conserva la URL original si la imagen ya no está disponible. Sin esta variable, la app conserva la ilustración de respaldo y no requiere imágenes externas.
-
-## Despliegue
-
-Puedes importar el repositorio a Vercel y configurar allí las mismas variables de servidor. Nunca configures `SUPABASE_SERVICE_ROLE_KEY` o `AI_MODEL_API_KEY` como variables públicas.
+La información nutricional es aproximada y no sustituye el consejo médico. La detección de alérgenos no garantiza que una receta sea segura: revisa siempre las etiquetas y el riesgo de contaminación cruzada.
